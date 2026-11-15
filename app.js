@@ -1505,9 +1505,9 @@
     el.scrollTop = 0;
 
     var brand = '<div class="gate__brand">' +
-        '<div class="crest">HTS</div>' +
-        '<div><h1>HTS Klerksdorp</h1><p class="gate__motto">' + MOTTO + '</p></div>' +
-      '</div>';
+        '<img class="gate__logo" src="school-logo.svg?v=2" alt="Technical High School — Uberrimae Fidei">' +
+      '</div>' +
+      '<h1 class="gate__school">HTS Klerksdorp Hostel</h1>';
 
     var active = state.staff.filter(function (s) { return s.active !== false; });
     gateSig = staffSignature();
@@ -1750,7 +1750,7 @@
     b.id = 'installBtn';
     b.className = 'btn btn--gold';
     b.type = 'button';
-    b.style.cssText = 'position:fixed;right:14px;bottom:calc(16px + env(safe-area-inset-bottom));z-index:90;box-shadow:0 8px 22px rgba(13,42,77,.3)';
+    b.style.cssText = 'position:fixed;right:14px;bottom:calc(16px + env(safe-area-inset-bottom));z-index:90;box-shadow:0 8px 22px rgba(30,73,57,.3)';
     b.textContent = '⬇ Install App';
     b.addEventListener('click', function () {
       if (!deferredPrompt) return;

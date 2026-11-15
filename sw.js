@@ -1,12 +1,14 @@
 /* HTS Klerksdorp Hostel PWA — service worker
    Cache-first shell so the app opens offline on any phone. */
-var CACHE = 'hts-hostel-v6';
+var CACHE = 'hts-hostel-v8';
 var ASSETS = [
   './',
   './index.html',
   './styles.css',
   './app.js',
   './manifest.webmanifest',
+  './school-logo.svg',
+  './school-logo.svg?v=2',
   './icon.svg',
   './icon-192.png',
   './icon-512.png'

@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 176" role="img" aria-labelledby="title desc">
+  <title id="title">Technical High School</title>
+  <desc id="desc">School wordmark with a feather, the motto Uberrimae Fidei, and an open book.</desc>
+  <rect width="480" height="176" rx="8" fill="#fffdf9"/>
+
+  <g fill="none" stroke="#c65b45" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M305 91C354 67 389 37 453 13 428 11 401 8 375 14 338 23 317 48 305 91Z"
+          fill="#c65b45" stroke-width="1.5"/>
+    <path d="M309 88C354 63 394 37 447 15" stroke="#fffdf9" stroke-width="2.2"/>
+    <path d="m326 76-4-21 18 9m0-7-2-19 18 10m1-8 3-19 16 13m4-9 10-14 11 17m4-12 17-9 7 20m8-17 21-4-2 19"
+          stroke="#f2a18c" stroke-width="1.5"/>
+    <path d="M306 91c-14-2-26-1-39 4m40-3c-6 7-14 12-24 15" stroke-width="2"/>
+  </g>
+
+  <text x="16" y="72" fill="#b84f3c" font-family="'Segoe Script','Brush Script MT',cursive"
+        font-size="37" font-style="italic" letter-spacing="-2" textLength="274" lengthAdjust="spacingAndGlyphs"
+        transform="rotate(-3 160 66)">
+    Technical High School
+  </text>
+
+  <g fill="#fffdf9" stroke="#294f40" stroke-linejoin="round">
+    <path d="m83 99-14 8 14 8-8 12h18l8 12 8-12h262l8 12 8-12h18l-8-12 14-8-14-8-4-10H87Z"
+          stroke-width="2"/>
+    <path d="M105 103h270v20H105z" stroke="none"/>
+  </g>
+  <text x="240" y="118" text-anchor="middle" fill="#263f35"
+        font-family="Georgia,'Times New Roman',serif" font-size="15" font-weight="700" letter-spacing="1.2">
+    UBERRIMAE FIDEI
+  </text>
+
+  <g fill="none" stroke="#566a5f" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M124 143c36-12 77-11 116 2 39-13 80-14 116-2l-9 9c-33-8-68-7-107 6-39-13-74-14-107-6z" stroke-width="2"/>
+    <path d="M240 145v13m-100-12 10 8m190-8-10 8M154 145c24-5 51-3 76 5m96-5c-24-5-51-3-76 5" stroke-width="1.2"/>
+  </g>
+</svg>
