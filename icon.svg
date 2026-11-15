@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="HTS Klerksdorp Hostel">
+  <rect width="512" height="512" rx="96" fill="#0d2a4d"/>
+  <circle cx="256" cy="256" r="150" fill="none" stroke="#c9a227" stroke-width="16"/>
+  <circle cx="256" cy="256" r="126" fill="#123a68"/>
+  <text x="256" y="248" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif"
+        font-size="104" font-weight="800" fill="#ffffff" letter-spacing="2">HTS</text>
+  <text x="256" y="316" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif"
+        font-size="34" font-weight="700" fill="#c9a227" letter-spacing="3">HOSTEL</text>
+</svg>
