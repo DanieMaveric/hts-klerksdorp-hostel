@@ -21,7 +21,6 @@
   var DEFAULT_PHONE = '082 555 1234';
   var MOTTO = 'UBERRIMAE FIDEI';
   var OWNER_NAME = 'D Smit';            // the only account with full control
-  var DEFAULT_PASSCODE = '1234';
   var ROOM_COUNT = 64;
   var POLL_MS = 10000;                  // how often we look for other phones' updates
 
@@ -93,7 +92,6 @@
      --------------------------------------------------------- */
   var state;
   var session = null;          // { id, name, role }
-  var gateStep = 'pass';       // 'pass' then 'who'
 
   var ui = {
     view: 'dashboard',
@@ -130,7 +128,6 @@
       updatedAt: 0,                    // 0 = this is a fresh seed, the cloud wins
       settings: {
         duty: OWNER_NAME,
-        passcode: DEFAULT_PASSCODE,
         shiftStarted: new Date().toISOString()
       },
       staff: [
@@ -806,10 +803,10 @@
       return '<tr>' +
         '<td data-label="Staff member" class="td-strong">' + esc(s.name) +
           '<br><span class="td-muted" style="font-weight:500">' + (s.role === 'owner' ? 'Owner — full control' : 'Staff') + '</span></td>' +
-        '<td data-label="PIN">' + (s.pin ? '<span class="pill pill--green">Set</span>' : '<span class="pill pill--amber">Not set</span>') + '</td>' +
+        '<td data-label="Password">' + (s.pin ? '<span class="pill pill--green">Set</span>' : '<span class="pill pill--amber">Not set</span>') + '</td>' +
         '<td data-label="Status">' + (s.active === false ? '<span class="pill pill--muted">Disabled</span>' : '<span class="pill pill--green">Active</span>') + '</td>' +
         '<td data-label="Actions"><div class="row" style="gap:8px">' +
-          '<button class="btn btn--ghost btn--sm" data-action="staff-pin" data-id="' + s.id + '">Set PIN</button>' +
+          '<button class="btn btn--ghost btn--sm" data-action="staff-pin" data-id="' + s.id + '">Set password</button>' +
           (s.role === 'owner' ? '<button class="btn btn--ghost btn--sm" data-action="staff-rename" data-id="' + s.id + '">Rename</button>'
             : '<button class="btn btn--ghost btn--sm" data-action="staff-rename" data-id="' + s.id + '">Rename</button>' +
               '<button class="btn btn--ghost btn--sm" data-action="staff-toggle" data-id="' + s.id + '">' + (s.active === false ? 'Enable' : 'Disable') + '</button>' +
@@ -821,14 +818,14 @@
     return '' +
       '<div class="section-head">' +
         '<h2>Administration</h2>' +
-        '<p>Owner controls — staff accounts, the hostel passcode and the shared data link.</p>' +
+        '<p>Owner controls — staff accounts, staff passwords and the shared data link.</p>' +
       '</div>' +
 
       '<section class="card">' +
         '<div class="card__head"><h3>Staff accounts</h3></div>' +
-        '<p class="card__hint" style="margin-bottom:12px">Every staff member signs in with their own name and personal PIN.</p>' +
+        '<p class="card__hint" style="margin-bottom:12px">Every staff member signs in with their own name and the password you set for them.</p>' +
         '<div class="tablewrap"><table class="responsive"><thead><tr>' +
-          '<th>Staff member</th><th>PIN</th><th>Status</th><th>Actions</th>' +
+          '<th>Staff member</th><th>Password</th><th>Status</th><th>Actions</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
         '<div style="margin-top:12px"><button class="btn btn--gold" data-action="staff-add">＋ Add staff member</button></div>' +
       '</section>' +
@@ -836,7 +833,6 @@
       '<section class="card">' +
         '<div class="card__head"><h3>Hostel settings</h3></div>' +
         '<div class="field"><label>Duty officer</label><input type="text" id="setDuty" value="' + esc(state.settings.duty || '') + '"></div>' +
-        '<div class="field"><label>Hostel passcode (shared gate)</label><input type="text" id="setPass" value="' + esc(state.settings.passcode || DEFAULT_PASSCODE) + '"></div>' +
         '<div class="modal__actions">' +
           '<button class="btn btn--primary" data-action="settings-save">Save settings</button>' +
         '</div>' +
@@ -1309,7 +1305,7 @@
     if (!requireOwner()) return;
     openModal('Add staff member', '' +
       '<div class="field"><label>Full name</label><input type="text" id="stName" placeholder="e.g. J. Molefe"></div>' +
-      '<div class="field"><label>Personal PIN (at least 4 digits)</label><input type="text" id="stPin" inputmode="numeric" placeholder="e.g. 4821"></div>' +
+      '<div class="field"><label>Login password (at least 4 characters)</label><input type="text" id="stPin" placeholder="e.g. molefe2027"></div>' +
       '<div class="modal__actions">' +
         '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
         '<button class="btn btn--primary" id="stSave" type="button">Add staff</button>' +
@@ -1318,7 +1314,7 @@
           var name = $('#stName', body).value.trim();
           var pin = $('#stPin', body).value.trim();
           if (!name) { toast('Enter the staff member\'s name'); return; }
-          if (pin.length < 4) { toast('PIN must be at least 4 digits'); return; }
+          if (pin.length < 4) { toast('Password must be at least 4 characters'); return; }
           state.staff.push({ id: uid('s'), name: name, pin: pin, role: 'staff', active: true });
           saveState(); closeModal(); toast('Staff member added'); render();
         });
@@ -1329,17 +1325,17 @@
     if (!requireOwner()) return;
     var s = state.staff.find(function (x) { return x.id === id; });
     if (!s) return;
-    openModal('PIN for ' + s.name, '' +
-      '<div class="field"><label>New PIN (at least 4 digits)</label><input type="text" id="spPin" inputmode="numeric" placeholder="••••"></div>' +
+    openModal('Password for ' + s.name, '' +
+      '<div class="field"><label>New password (at least 4 characters)</label><input type="text" id="spPin" placeholder="e.g. molefe2027"></div>' +
       '<div class="modal__actions">' +
         '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
-        '<button class="btn btn--primary" id="spSave" type="button">Save PIN</button>' +
+        '<button class="btn btn--primary" id="spSave" type="button">Save password</button>' +
       '</div>', function (body) {
         $('#spSave', body).addEventListener('click', function () {
           var pin = $('#spPin', body).value.trim();
-          if (pin.length < 4) { toast('PIN must be at least 4 digits'); return; }
+          if (pin.length < 4) { toast('Password must be at least 4 characters'); return; }
           s.pin = pin;
-          saveState(); closeModal(); toast('PIN updated for ' + s.name); render();
+          saveState(); closeModal(); toast('Password updated for ' + s.name); render();
         });
       });
   }
@@ -1367,7 +1363,7 @@
   function signOut() {
     session = null;
     localStorage.removeItem(SESSION_KEY);
-    gateStep = 'pass';
+    gateError = '';
     closeModal();
     stopPolling();
     setSync('local', 'Signed out');
@@ -1394,6 +1390,9 @@
   /* ---------------------------------------------------------
      11. LOGIN GATE
      --------------------------------------------------------- */
+  var gateError = '';
+  var gateWho = '';            // remembers the chosen staff member between attempts
+
   function renderGate() {
     var el = $('#gate');
     if (!el) return;
@@ -1406,70 +1405,55 @@
         '<div><h1>HTS Klerksdorp</h1><p class="gate__motto">' + MOTTO + '</p></div>' +
       '</div>';
 
-    if (gateStep === 'pass') {
-      el.innerHTML = '<div class="gate__card">' + brand +
-        '<h2 class="gate__title">Hostel staff access</h2>' +
-        '<p class="gate__hint">Enter the hostel passcode to continue.</p>' +
-        '<div class="field"><label>Hostel passcode</label><input type="password" id="gatePass" inputmode="numeric" placeholder="••••"></div>' +
-        '<div class="gate__err" id="gateErr">' + esc(gateError || '') + '</div>' +
-        '<button class="btn btn--gold gate__btn" id="gateGo" type="button">Unlock</button>' +
-        '</div>';
-      var input = $('#gatePass');
-      input.focus();
-      function tryPass() {
-        var v = input.value.trim();
-        if (v === String(state.settings.passcode || DEFAULT_PASSCODE)) {
-          gateStep = 'who'; gateError = ''; renderGate();
-        } else {
-          gateError = 'Incorrect passcode. Please try again.';
-          renderGate();
-        }
-      }
-      $('#gateGo').addEventListener('click', tryPass);
-      input.addEventListener('keydown', function (e) { if (e.key === 'Enter') tryPass(); });
-      return;
-    }
-
     var active = state.staff.filter(function (s) { return s.active !== false; });
     var opts = active.map(function (s) {
-      return '<option value="' + s.id + '" data-nopin="' + (s.pin ? '0' : '1') + '">' +
+      return '<option value="' + s.id + '" data-nopass="' + (s.pin ? '0' : '1') + '" data-owner="' + (s.role === 'owner' ? '1' : '0') + '">' +
         esc(s.name) + (s.role === 'owner' ? ' (Owner)' : '') + '</option>';
     }).join('');
 
     el.innerHTML = '<div class="gate__card">' + brand +
-      '<h2 class="gate__title">Sign in</h2>' +
-      '<p class="gate__hint">Choose your name and enter your personal PIN.</p>' +
+      '<h2 class="gate__title">Staff sign in</h2>' +
+      '<p class="gate__hint">Choose your name and enter the password ' + esc(OWNER_NAME) + ' set for you.</p>' +
       '<div class="field"><label>Staff member</label><select id="gateWho">' + opts + '</select></div>' +
-      '<div class="field"><label id="gatePinLabel">Personal PIN</label><input type="password" id="gatePin" inputmode="numeric" placeholder="••••"></div>' +
+      '<div class="field"><label id="gatePassLabel">Password</label><input type="password" id="gatePin" placeholder="••••"></div>' +
       '<div class="gate__err" id="gateErr">' + esc(gateError || '') + '</div>' +
       '<button class="btn btn--gold gate__btn" id="gateSignIn" type="button">Sign in</button>' +
-      '<button class="linkbtn gate__back" id="gateBack" type="button">← Back to passcode</button>' +
-      '<p class="gate__hint" style="margin-top:12px">New here? Ask ' + esc(OWNER_NAME) + ' to add you and set your PIN.</p>' +
+      '<p class="gate__hint" style="margin-top:12px">New here? Ask ' + esc(OWNER_NAME) + ' to add you and set your password.</p>' +
       '</div>';
 
-    var who = $('#gateWho'), pin = $('#gatePin'), label = $('#gatePinLabel');
+    var who = $('#gateWho'), pass = $('#gatePin'), label = $('#gatePassLabel');
+    if (gateWho) who.value = gateWho;
+    if (who.selectedIndex < 0 && who.options.length) who.selectedIndex = 0;
+    gateWho = who.value;
     function refreshLabel() {
       var o = who.options[who.selectedIndex];
-      var noPin = o && o.dataset.nopin === '1';
-      label.textContent = noPin ? 'Create your PIN (4+ digits)' : 'Personal PIN';
+      var noPass = o && o.dataset.nopass === '1';
+      var isOwner = o && o.dataset.owner === '1';
+      label.textContent = (noPass && isOwner) ? 'Create your owner password (4+ characters)' : 'Password';
     }
-    who.addEventListener('change', refreshLabel);
+    who.addEventListener('change', function () { gateWho = who.value; refreshLabel(); });
     refreshLabel();
+    pass.focus();
 
     function trySignIn() {
       var s = state.staff.find(function (x) { return x.id === who.value; });
       if (!s) return;
-      var v = pin.value.trim();
+      gateWho = who.value;
+      var v = pass.value.trim();
       if (!s.pin) {
-        if (v.length < 4) { gateError = 'Choose a PIN with at least 4 digits.'; renderGate(); return; }
+        if (s.role !== 'owner') {
+          gateError = 'No password has been set for ' + s.name + '. Ask ' + OWNER_NAME + ' to set it.';
+          renderGate(); return;
+        }
+        if (v.length < 4) { gateError = 'Choose a password with at least 4 characters.'; renderGate(); return; }
         s.pin = v;
       } else if (v !== String(s.pin)) {
-        gateError = 'Incorrect PIN. Please try again.'; renderGate(); return;
+        gateError = 'Incorrect password. Please try again.'; renderGate(); return;
       }
       session = { id: s.id, name: s.name, role: s.role };
       localStorage.setItem(SESSION_KEY, JSON.stringify(session));
       gateError = '';
-      saveState();                 // stores the new PIN + shares it
+      saveState();                 // stores the new password + shares it
       renderGate();                // hides the gate
       syncHeader();
       render(true);
@@ -1478,10 +1462,8 @@
       toast('Welcome, ' + s.name);
     }
     $('#gateSignIn').addEventListener('click', trySignIn);
-    pin.addEventListener('keydown', function (e) { if (e.key === 'Enter') trySignIn(); });
-    $('#gateBack').addEventListener('click', function () { gateStep = 'pass'; gateError = ''; renderGate(); });
+    pass.addEventListener('keydown', function (e) { if (e.key === 'Enter') trySignIn(); });
   }
-  var gateError = '';
 
   /* ---------------------------------------------------------
      12. HEADER SYNC
@@ -1577,7 +1559,6 @@
       else if (a === 'settings-save') {
         if (!requireOwner()) return;
         state.settings.duty = $('#setDuty').value.trim() || state.settings.duty;
-        state.settings.passcode = $('#setPass').value.trim() || DEFAULT_PASSCODE;
         saveState(); syncHeader(); toast('Settings saved');
       }
       else if (a === 'sync-now') {
