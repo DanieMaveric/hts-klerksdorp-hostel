@@ -1,18 +1,32 @@
 /* ============================================================
    HTS Klerksdorp Hostel — Staff Management & Operations PWA
-   Vanilla JS single-page app. Works on any phone browser,
-   installable, offline-ready. All staff are admins.
+   Vanilla JS single-page app. Installable, offline-ready.
+   Owner (D Smit) has full control. Staff sign in with
+   their name + a personal PIN and can log discipline,
+   do roll call, inspect rooms and send broadcasts.
+   All devices share one live dataset (Supabase REST).
    ============================================================ */
 (function () {
   'use strict';
 
-  var STORE_KEY = 'hts_hostel_pwa_v1';
+  var STORE_KEY   = 'hts_hostel_pwa_v1';        // offline cache (this device)
+  var SESSION_KEY = 'hts_hostel_session_v1';    // who is signed in on this device
+
+  /* --- shared cloud store (publishable/anon key only) --- */
+  var CLOUD_URL = 'https://czsoojfrnwcwyzejxsge.supabase.co/rest/v1/hostel_state';
+  var CLOUD_KEY = 'sb_publishable_yOnH6G9Hm1RL90RvZLQvvw_LjIhNpXD';
+  var CLOUD_ROW = 'hts-klerksdorp-hostel-8f4b21d7c9';
+
   var BASE_POINTS = 10;                 // starting points for every boarder
   var DEFAULT_PHONE = '082 555 1234';
   var MOTTO = 'UBERRIMAE FIDEI';
+  var OWNER_NAME = 'D Smit';            // the only account with full control
+  var DEFAULT_PASSCODE = '1234';
+  var ROOM_COUNT = 64;
+  var POLL_MS = 10000;                  // how often we look for other phones' updates
 
   /* ---------------------------------------------------------
-     1. SEED DATA — the 44 boarders from the hostel document
+     1. SEED DATA — the boarders from the hostel document
      --------------------------------------------------------- */
   var SEED_BOARDERS = [
     ['Gaoorwe, Arancha', 8, 1], ['Kwenamore, Chriseldah', 8, 2],
@@ -51,6 +65,7 @@
      2. SMALL UTILITIES
      --------------------------------------------------------- */
   function $(sel, root) { return (root || document).querySelector(sel); }
+  function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -63,14 +78,13 @@
     return t.getFullYear() + '-' + m + '-' + day;
   }
   function prettyDate(key) {
-    var p = key.split('-');
+    var p = String(key).split('-');
     var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     return Number(p[2]) + ' ' + months[Number(p[1]) - 1] + ' ' + p[0];
   }
   function surnameOf(name) {
     if (name.indexOf(',') > -1) return name.split(',')[0].trim();
-    var ampersand = name.split('&')[0].trim().split(' ')[0];
-    return ampersand;
+    return name.split('&')[0].trim().split(' ')[0];
   }
   function uid(prefix) { return (prefix || 'id') + '_' + Math.random().toString(36).slice(2, 9); }
 
@@ -78,6 +92,9 @@
      3. STATE
      --------------------------------------------------------- */
   var state;
+  var session = null;          // { id, name, role }
+  var gateStep = 'pass';       // 'pass' then 'who'
+
   var ui = {
     view: 'dashboard',
     grade: 'all',
@@ -87,6 +104,12 @@
     parentSearch: '',
     bookingSearch: ''
   };
+
+  function seedRooms() {
+    var out = [];
+    for (var n = 1; n <= ROOM_COUNT; n++) out.push({ number: n, label: 'Room ' + n });
+    return out;
+  }
 
   function seedState() {
     var boarders = SEED_BOARDERS.map(function (b, i) {
@@ -99,26 +122,27 @@
       parents['p' + (i + 1)] = {
         name: 'Mr/Ms ' + sn,
         relation: multi ? 'Parents' : 'Parent/Guardian',
-        phone: DEFAULT_PHONE,
-        altPhone: '',
-        email: '',
-        note: ''
+        phone: DEFAULT_PHONE, altPhone: '', email: '', note: ''
       };
     });
-    var t = Date.now();
     return {
-      version: 1,
+      version: 2,
+      updatedAt: 0,                    // 0 = this is a fresh seed, the cloud wins
       settings: {
-        staff: 'Fresh Start',
-        duty: 'D. Smit',
-        role: 'admin',           // every user is an admin
-        shiftStarted: new Date(t).toISOString()
+        duty: OWNER_NAME,
+        passcode: DEFAULT_PASSCODE,
+        shiftStarted: new Date().toISOString()
       },
+      staff: [
+        { id: 's1', name: OWNER_NAME, pin: '', role: 'owner', active: true }
+      ],
+      rooms: seedRooms(),
       boarders: boarders,
       parents: parents,
-      incidents: [],             // {id, boarderId, type, points, note, staff, at}
-      attendance: {},            // { 'YYYY-MM-DD': { boarderId: {status, lateTime} } }
-      roomChecks: {},            // { 'YYYY-MM-DD': { room: {status, note, photo} } }
+      incidents: [],
+      attendance: {},
+      roomChecks: {},
+      messages: [],
       bookings: [
         {
           id: uid('bk'), learner: 'Mokoena, Lesedi', grade: 8,
@@ -136,33 +160,164 @@
     };
   }
 
-  function loadState() {
+  /* Makes sure a payload from the cloud (or an older local copy) has every
+     collection this version of the app expects. */
+  function normalize(s) {
+    if (!s || typeof s !== 'object') return seedState();
+    var base = seedState();
+    s.settings  = Object.assign({}, base.settings, s.settings || {});
+    if (!Array.isArray(s.staff) || !s.staff.length) s.staff = base.staff;
+    if (!Array.isArray(s.rooms) || !s.rooms.length) s.rooms = base.rooms;
+    if (!Array.isArray(s.boarders)) s.boarders = [];
+    if (!s.parents || typeof s.parents !== 'object') s.parents = {};
+    if (!Array.isArray(s.incidents)) s.incidents = [];
+    if (!s.attendance || typeof s.attendance !== 'object') s.attendance = {};
+    if (!s.roomChecks || typeof s.roomChecks !== 'object') s.roomChecks = {};
+    if (!Array.isArray(s.messages)) s.messages = [];
+    if (!Array.isArray(s.bookings)) s.bookings = [];
+    if (typeof s.updatedAt !== 'number') s.updatedAt = 0;
+    // the owner account must always exist
+    if (!s.staff.some(function (x) { return x.role === 'owner'; })) {
+      s.staff.unshift({ id: 's1', name: OWNER_NAME, pin: '', role: 'owner', active: true });
+    }
+    return s;
+  }
+
+  function loadLocal() {
     try {
       var raw = localStorage.getItem(STORE_KEY);
-      if (raw) {
-        var parsed = JSON.parse(raw);
-        if (parsed && parsed.boarders && parsed.boarders.length) {
-          // guarantee the admin privilege on every load
-          parsed.settings = parsed.settings || {};
-          parsed.settings.role = 'admin';
-          return parsed;
-        }
-      }
+      if (raw) return normalize(JSON.parse(raw));
     } catch (e) { /* corrupt store — fall through to seed */ }
     return seedState();
   }
-
+  function persistLocal() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+    catch (e) { toast('Storage full — export a report and clear old photos.'); }
+  }
   function saveState() {
-    try {
-      state.settings.role = 'admin';
-      localStorage.setItem(STORE_KEY, JSON.stringify(state));
-    } catch (e) {
-      toast('Storage full — export a report and clear old photos.');
-    }
+    state.updatedAt = Date.now();
+    persistLocal();
+    schedulePush();
+  }
+  function saveStateQuiet() { saveState(); }
+
+  /* ---------------------------------------------------------
+     4. ROLE HELPERS
+     --------------------------------------------------------- */
+  function isOwner() { return !!session && session.role === 'owner'; }
+  function isSignedIn() { return !!session; }
+  function requireOwner() {
+    if (isOwner()) return true;
+    toast('Only ' + OWNER_NAME + ' (owner) can do that.');
+    return false;
+  }
+  function currentStaffName() { return session ? session.name : '—'; }
+  function occupantsOf(roomNumber) {
+    return state.boarders.filter(function (b) { return Number(b.room) === Number(roomNumber); });
   }
 
   /* ---------------------------------------------------------
-     4. DERIVED HELPERS
+     5. CLOUD SYNC — every phone shares one dataset
+     --------------------------------------------------------- */
+  function cloudHeaders() {
+    return {
+      'apikey': CLOUD_KEY,
+      'Authorization': 'Bearer ' + CLOUD_KEY,
+      'Content-Type': 'application/json'
+    };
+  }
+  function cloudPull() {
+    return fetch(CLOUD_URL + '?key=eq.' + encodeURIComponent(CLOUD_ROW) + '&select=data',
+      { headers: cloudHeaders(), cache: 'no-store' }
+    ).then(function (r) {
+      if (!r.ok) throw new Error('pull ' + r.status);
+      return r.json();
+    }).then(function (rows) {
+      return rows && rows[0] && rows[0].data ? rows[0].data : null;
+    });
+  }
+  function cloudPush(payload) {
+    return fetch(CLOUD_URL + '?on_conflict=key', {
+      method: 'POST',
+      headers: Object.assign(cloudHeaders(), { 'Prefer': 'resolution=merge-duplicates,return=minimal' }),
+      body: JSON.stringify([{ key: CLOUD_ROW, data: payload, updated_at: new Date().toISOString() }])
+    }).then(function (r) {
+      if (!r.ok) throw new Error('push ' + r.status);
+      return true;
+    });
+  }
+
+  function setSync(kind, text) {
+    var el = $('#syncPill');
+    if (!el) return;
+    var map = { live: 'pill--green', offline: 'pill--red', syncing: 'pill--amber', local: 'pill--muted' };
+    el.className = 'pill ' + (map[kind] || 'pill--muted');
+    el.innerHTML = '<span class="dot"></span> ' + esc(text ||
+      ({ live: 'Live sync', offline: 'Offline', syncing: 'Syncing…', local: 'Local only' }[kind] || ''));
+  }
+
+  var pushTimer = null, pushing = false, pushAgain = false;
+  function schedulePush() {
+    if (!isSignedIn()) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(doPush, 1200);
+  }
+  function doPush() {
+    if (!isSignedIn()) return;
+    if (pushing) { pushAgain = true; return; }
+    pushing = true;
+    setSync('syncing');
+    cloudPush(state).then(function () {
+      setSync('live');
+    }).catch(function () {
+      setSync('offline');
+    }).then(function () {
+      pushing = false;
+      if (pushAgain) { pushAgain = false; doPush(); }
+    });
+  }
+  function pullOnce(silent) {
+    if (document.querySelector('.modal:not([hidden])')) return Promise.resolve();
+    return cloudPull().then(function (remote) {
+      if (remote && typeof remote.updatedAt === 'number' &&
+          remote.updatedAt > (state.updatedAt || 0) + 400) {
+        state = normalize(remote);
+        persistLocal();
+        // the owner may have removed or disabled this account on another phone
+        if (session) {
+          var still = state.staff.find(function (x) { return x.id === session.id && x.active !== false; });
+          if (!still) {
+            session = null;
+            localStorage.removeItem(SESSION_KEY);
+            stopPolling();
+            syncHeader();
+            renderGate();
+            toast('Your account was changed — please sign in again');
+            return;
+          }
+          session.role = still.role;
+          session.name = still.name;
+        }
+        syncHeader();
+        render();
+        if (!silent) toast('Synced from another device');
+      }
+      setSync('live');
+    }).catch(function () { setSync('offline'); });
+  }
+
+  var pollTimer = null;
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(function () {
+      if (document.hidden || !isSignedIn()) return;
+      pullOnce(true);
+    }, POLL_MS);
+  }
+  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+  /* ---------------------------------------------------------
+     6. DERIVED HELPERS
      --------------------------------------------------------- */
   function netPoints(boarder) {
     var sum = BASE_POINTS;
@@ -187,7 +342,7 @@
   function todayIncidentCount(type) {
     var today = todayKey();
     return state.incidents.filter(function (i) {
-      return i.type === type && i.at.slice(0, 10) === today;
+      return i.type === type && String(i.at).slice(0, 10) === today;
     }).length;
   }
   function attendanceFor(dateKey) {
@@ -213,13 +368,25 @@
       return true;
     });
   }
+  function roomLabel(n) {
+    var r = state.rooms.find(function (x) { return Number(x.number) === Number(n); });
+    return r ? r.label : 'Room ' + n;
+  }
+  function roomOptions(selected) {
+    return state.rooms.map(function (r) {
+      var use = occupantsOf(r.number).length;
+      return '<option value="' + r.number + '"' + (Number(selected) === Number(r.number) ? ' selected' : '') + '>' +
+        esc(r.label) + ' — ' + use + ' learner' + (use === 1 ? '' : 's') + '</option>';
+    }).join('');
+  }
 
   /* ---------------------------------------------------------
-     5. UI PRIMITIVES — toast, modal
+     7. UI PRIMITIVES — toast, modal
      --------------------------------------------------------- */
   var toastTimer;
   function toast(msg) {
     var el = $('#toast');
+    if (!el) return;
     el.textContent = msg;
     el.hidden = false;
     clearTimeout(toastTimer);
@@ -239,15 +406,18 @@
   }
 
   /* ---------------------------------------------------------
-     6. VIEW RENDERERS
+     8. VIEW RENDERERS
      --------------------------------------------------------- */
 
   /* ---- Dashboard ---- */
   function renderDashboard() {
     var total = state.boarders.length;
+    var rooms = state.rooms.length;
     var demerits = todayIncidentCount('demerit');
     var lates = todayIncidentCount('late');
-    var roomsDone = Object.keys(roomChecksFor(ui.roomDate)).length;
+    var roomsDone = Object.keys(roomChecksFor(ui.roomDate)).filter(function (k) {
+      return state.rooms.some(function (r) { return String(r.number) === String(k); });
+    }).length;
     var bookings = state.bookings;
     var pending = bookings.filter(function (b) { return b.status === 'pending'; }).length;
 
@@ -267,29 +437,36 @@
         }).join('')
       : '<tr><td colspan="5" class="empty">No incidents logged yet.</td></tr>';
 
-    var pct = total ? Math.round((roomsDone / total) * 100) : 0;
+    var pct = rooms ? Math.round((roomsDone / rooms) * 100) : 0;
+
+    var latest = state.messages.length ? state.messages[state.messages.length - 1] : null;
+    var banner = latest
+      ? '<div class="notice notice--msg"><strong>📣 Broadcast — ' + esc(latest.staff) +
+        ' • ' + esc(new Date(latest.at).toLocaleString()) + '</strong><br>' + esc(latest.text) + '</div>'
+      : '';
 
     return '' +
       '<div class="section-head">' +
         '<h2>Hostel Operational Hub</h2>' +
         '<p>Managing daily discipline, roll call, photo room inspections, parent records, and 2027 enrolments.</p>' +
       '</div>' +
-
+      banner +
       '<div class="row" style="margin-bottom:16px">' +
         '<button class="btn btn--primary" data-action="log-picker">＋ Log Merit/Demerit</button>' +
+        '<button class="btn btn--ghost" data-action="go" data-view="broadcast">📣 Broadcast</button>' +
         '<button class="btn btn--ghost" data-action="export-report">⬇ Export Report</button>' +
       '</div>' +
 
       '<div class="stats">' +
         '<div class="stat"><div class="stat__label">Total Boarders</div>' +
-          '<div class="stat__value">' + total + '</div><div class="stat__sub">Active Roster</div></div>' +
+          '<div class="stat__value">' + total + '</div><div class="stat__sub">Active roster</div></div>' +
         '<div class="stat stat--red"><div class="stat__label">Demerits Logged</div>' +
-          '<div class="stat__value">' + demerits + '</div><div class="stat__sub">Today\'s Record</div></div>' +
+          '<div class="stat__value">' + demerits + '</div><div class="stat__sub">Today\'s record</div></div>' +
         '<div class="stat stat--amber"><div class="stat__label">Late Comings</div>' +
-          '<div class="stat__value">' + lates + '</div><div class="stat__sub">Today\'s Record</div></div>' +
+          '<div class="stat__value">' + lates + '</div><div class="stat__sub">Today\'s record</div></div>' +
         '<div class="stat stat--blue"><div class="stat__label">2027 Bookings</div>' +
           '<div class="stat__value">' + bookings.length + '</div>' +
-          '<div class="stat__sub">' + pending + ' Pending</div></div>' +
+          '<div class="stat__sub">' + pending + ' pending</div></div>' +
       '</div>' +
 
       '<section class="card">' +
@@ -302,8 +479,8 @@
       '<section class="card">' +
         '<div class="card__head"><h3>Room Inspection Overview</h3></div>' +
         '<div class="row" style="justify-content:space-between">' +
-          '<span class="card__hint">Rooms Checked Today</span>' +
-          '<strong>' + roomsDone + ' / ' + total + '</strong>' +
+          '<span class="card__hint">Rooms checked on ' + esc(prettyDate(ui.roomDate)) + '</span>' +
+          '<strong>' + roomsDone + ' / ' + rooms + '</strong>' +
         '</div>' +
         '<div class="progress"><div class="progress__bar" style="width:' + pct + '%"></div></div>' +
         '<div class="notice" style="margin-top:14px">' +
@@ -319,12 +496,19 @@
     var rows = filteredBoarders().map(function (b) {
       var pts = netPoints(b);
       var cls = pts > BASE_POINTS ? 'pts-pos' : (pts < BASE_POINTS ? 'pts-neg' : 'pts-zero');
+      var extra = isOwner()
+        ? '<button class="btn btn--ghost btn--sm" data-action="move" data-id="' + b.id + '">Move</button>' +
+          '<button class="btn btn--ghost btn--sm" data-action="edit-learner" data-id="' + b.id + '">Edit</button>'
+        : '';
       return '<tr>' +
         '<td data-label="Boarder" class="td-strong">' + esc(b.name) + '</td>' +
-        '<td data-label="Grade &amp; Room" class="td-muted">Grade ' + b.grade + ' • Room ' + b.room + '</td>' +
+        '<td data-label="Grade &amp; Room" class="td-muted">Grade ' + b.grade + ' • ' + esc(roomLabel(b.room)) + '</td>' +
         '<td data-label="Net Points" class="' + cls + '">' + pts + ' pts</td>' +
         '<td data-label="Recent" class="td-muted">' + esc(recentIncidentText(b.id)) + '</td>' +
-        '<td data-label="Actions"><button class="btn btn--primary btn--sm" data-action="log" data-id="' + b.id + '">Log</button></td>' +
+        '<td data-label="Actions"><div class="row" style="gap:8px">' +
+          '<button class="btn btn--primary btn--sm" data-action="log" data-id="' + b.id + '">Log</button>' +
+          extra +
+        '</div></td>' +
         '</tr>';
     }).join('');
 
@@ -336,8 +520,9 @@
       '<div class="filterbar">' +
         '<div class="searchwrap"><input type="text" id="meritSearch" placeholder="Search boarder…" value="' + esc(ui.search) + '"></div>' +
         '<select id="meritGrade">' + gradeOptions() + '</select>' +
-        '<button class="btn btn--ghost" data-action="log-picker">＋ Log Merit/Demerit</button>' +
+        (isOwner() ? '<button class="btn btn--gold" data-action="add-learner">＋ Add Learner</button>' : '<span></span>') +
       '</div>' +
+      (isOwner() ? '' : '<div class="notice">Only ' + esc(OWNER_NAME) + ' can add learners, change details or move learners between rooms.</div>') +
       (rows ? '<section class="card"><div class="tablewrap"><table class="responsive"><thead><tr>' +
         '<th>Boarder Name</th><th>Grade &amp; Room</th><th>Net Points</th><th>Recent Incidents / Notes</th><th>Actions</th>' +
         '</tr></thead><tbody>' + rows + '</tbody></table></div></section>'
@@ -368,7 +553,7 @@
       var rec = day[b.id] || {};
       return '<tr>' +
         '<td data-label="Boarder" class="td-strong">' + esc(b.name) + '</td>' +
-        '<td data-label="Grade &amp; Room" class="td-muted">Grade ' + b.grade + ' • Room ' + b.room + '</td>' +
+        '<td data-label="Grade &amp; Room" class="td-muted">Grade ' + b.grade + ' • ' + esc(roomLabel(b.room)) + '</td>' +
         '<td data-label="Notes">' +
           '<input type="text" data-action="late-time" data-id="' + b.id + '" placeholder="Late time / notes" value="' + esc(rec.lateTime || '') + '">' +
         '</td>' +
@@ -391,7 +576,7 @@
         '<div><label>Roll call date</label><input type="date" id="attDate" value="' + ui.attDate + '"></div>' +
       '</div>' +
       '<div class="stats" style="grid-template-columns:repeat(3,1fr)">' +
-        '<div class="stat stat--green"><div class="stat__label">Present Today</div><div class="stat__value">' + present + '</div></div>' +
+        '<div class="stat stat--green"><div class="stat__label">Present</div><div class="stat__value">' + present + '</div></div>' +
         '<div class="stat stat--red"><div class="stat__label">Absent</div><div class="stat__value">' + absent + '</div></div>' +
         '<div class="stat stat--amber"><div class="stat__label">Late Coming</div><div class="stat__value">' + late + '</div></div>' +
       '</div>' +
@@ -400,50 +585,98 @@
       '</tr></thead><tbody>' + rows + '</tbody></table></div></section>';
   }
 
-  /* ---- Room Checks ---- */
+  /* ---- Room Checks — EVERY room, occupied or not ---- */
   function renderRooms() {
     var day = roomChecksFor(ui.roomDate);
     var tidy = 0, untidy = 0;
-    state.boarders.forEach(function (b) {
-      if (roomStatus(b.room, ui.roomDate) === 'tidy') tidy++; else untidy++;
+    state.rooms.forEach(function (r) {
+      if ((day[r.number] && day[r.number].status) === 'untidy') untidy++; else tidy++;
     });
 
-    var rows = state.boarders.map(function (b) {
-      var rec = day[b.room] || {};
+    var rows = state.rooms.map(function (r) {
+      var rec = day[r.number] || {};
       var st = rec.status || 'tidy';
+      var occ = occupantsOf(r.number);
+      var occHTML = occ.length
+        ? occ.map(function (b) { return esc(b.name); }).join('<br>')
+        : '<span class="td-muted">Unoccupied</span>';
       var photo = rec.photo
-        ? '<img class="thumb" src="' + rec.photo + '" alt="Room ' + b.room + ' photo" data-action="view-photo" data-room="' + b.room + '">'
+        ? '<img class="thumb" src="' + rec.photo + '" alt="Room ' + r.number + ' photo" data-action="view-photo" data-room="' + r.number + '">'
+        : '';
+      var manage = isOwner()
+        ? '<button type="button" class="btn btn--ghost btn--sm" data-action="room-manage" data-room="' + r.number + '">👥 Manage</button>'
         : '';
       return '<tr>' +
-        '<td data-label="Room" class="td-strong">Room ' + b.room + '<br><span class="td-muted" style="font-weight:500">' + esc(b.name) + '</span></td>' +
+        '<td data-label="Room" class="td-strong">' + esc(r.label) + '</td>' +
+        '<td data-label="Occupants" class="td-muted">' + occHTML + (manage ? '<div style="margin-top:8px">' + manage + '</div>' : '') + '</td>' +
         '<td data-label="Status">' +
           '<span class="seg">' +
-            '<button type="button" data-action="room" data-room="' + b.room + '" data-status="tidy" data-on="tidy" class="' + (st === 'tidy' ? 'is-on' : '') + '">Tidy</button>' +
-            '<button type="button" data-action="room" data-room="' + b.room + '" data-status="untidy" data-on="untidy" class="' + (st === 'untidy' ? 'is-on' : '') + '">Not Tidy</button>' +
+            '<button type="button" data-action="room" data-room="' + r.number + '" data-status="tidy" data-on="tidy" class="' + (st === 'tidy' ? 'is-on' : '') + '">Tidy</button>' +
+            '<button type="button" data-action="room" data-room="' + r.number + '" data-status="untidy" data-on="untidy" class="' + (st === 'untidy' ? 'is-on' : '') + '">Not Tidy</button>' +
           '</span>' +
         '</td>' +
         '<td data-label="Camera Photo"><div class="row" style="gap:8px">' +
-          '<button type="button" class="snapbtn" data-action="snap" data-room="' + b.room + '">📷 Snap</button>' + photo +
+          '<button type="button" class="snapbtn" data-action="snap" data-room="' + r.number + '">📷 Snap</button>' + photo +
         '</div></td>' +
-        '<td data-label="Inspector Notes"><input type="text" data-action="room-note" data-room="' + b.room + '" placeholder="Notes…" value="' + esc(rec.note || '') + '"></td>' +
+        '<td data-label="Inspector Notes"><input type="text" data-action="room-note" data-room="' + r.number + '" placeholder="Notes…" value="' + esc(rec.note || '') + '"></td>' +
         '</tr>';
     }).join('');
 
     return '' +
       '<div class="section-head">' +
         '<h2>Room Inspection &amp; Camera Capture</h2>' +
-        '<p>Inspect rooms daily, record tidiness status (−1 pt for untidy), and snap/upload photos.</p>' +
+        '<p>Every room is listed whether it is occupied or not. Record tidiness (−1 pt per learner for untidy rooms) and snap photos.</p>' +
       '</div>' +
       '<div class="filterbar" style="grid-template-columns:1fr">' +
         '<div><label>Inspection date</label><input type="date" id="roomDate" value="' + ui.roomDate + '"></div>' +
       '</div>' +
-      '<div class="stats" style="grid-template-columns:repeat(2,1fr)">' +
+      '<div class="stats" style="grid-template-columns:repeat(3,1fr)">' +
+        '<div class="stat"><div class="stat__label">Rooms</div><div class="stat__value">' + state.rooms.length + '</div></div>' +
         '<div class="stat stat--green"><div class="stat__label">Tidy Rooms</div><div class="stat__value">' + tidy + '</div></div>' +
         '<div class="stat stat--red"><div class="stat__label">Untidy / Issues</div><div class="stat__value">' + untidy + '</div></div>' +
       '</div>' +
       '<section class="card"><div class="tablewrap"><table class="responsive"><thead><tr>' +
-        '<th>Room &amp; Boarder</th><th>Inspection Status</th><th>Camera Photo</th><th>Inspector Notes</th>' +
+        '<th>Room</th><th>Occupants</th><th>Inspection Status</th><th>Camera Photo</th><th>Inspector Notes</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table></div></section>';
+  }
+
+  /* ---- Rooms screen — owner manages the room inventory ---- */
+  function renderRoomsAdmin() {
+    if (!isOwner()) {
+      return '<section class="card"><p class="empty">Only ' + esc(OWNER_NAME) + ' can manage the room list.</p></section>';
+    }
+    var used = 0;
+    var rows = state.rooms.slice().sort(function (a, b) { return a.number - b.number; }).map(function (r) {
+      var occ = occupantsOf(r.number);
+      if (occ.length) used++;
+      return '<tr>' +
+        '<td data-label="Room" class="td-strong">' + esc(r.label) + '<br><span class="td-muted" style="font-weight:500">Number ' + r.number + '</span></td>' +
+        '<td data-label="Occupants" class="td-muted">' + (occ.length ? occ.length + ' in room' : 'Free') +
+          (occ.length ? '<br>' + occ.map(function (b) { return esc(b.name); }).join('<br>') : '') + '</td>' +
+        '<td data-label="Actions"><div class="row" style="gap:8px">' +
+          '<button class="btn btn--ghost btn--sm" data-action="room-edit" data-room="' + r.number + '">Rename</button>' +
+          '<button class="btn btn--red btn--sm" data-action="room-delete" data-room="' + r.number + '">Remove</button>' +
+        '</div></td>' +
+        '</tr>';
+    }).join('');
+
+    return '' +
+      '<div class="section-head">' +
+        '<h2>Rooms</h2>' +
+        '<p>Your hostel room list. Add, rename or remove rooms — Room Checks always shows this exact list.</p>' +
+      '</div>' +
+      '<div class="row" style="margin-bottom:16px">' +
+        '<button class="btn btn--gold" data-action="room-add">＋ Add Room</button>' +
+        '<button class="btn btn--ghost" data-action="export-report">⬇ Export Report</button>' +
+      '</div>' +
+      '<div class="stats" style="grid-template-columns:repeat(3,1fr)">' +
+        '<div class="stat"><div class="stat__label">Total Rooms</div><div class="stat__value">' + state.rooms.length + '</div></div>' +
+        '<div class="stat stat--blue"><div class="stat__label">In Use</div><div class="stat__value">' + used + '</div></div>' +
+        '<div class="stat stat--green"><div class="stat__label">Free</div><div class="stat__value">' + (state.rooms.length - used) + '</div></div>' +
+      '</div>' +
+      '<section class="card"><div class="tablewrap"><table class="responsive"><thead><tr>' +
+        '<th>Room</th><th>Occupants</th><th>Actions</th>' +
+      '</tr></thead><tbody>' + (rows || '<tr><td colspan="3" class="empty">No rooms yet — add one.</td></tr>') + '</tbody></table></div></section>';
   }
 
   /* ---- Parents ---- */
@@ -460,12 +693,12 @@
       var tel = (p.phone || '').replace(/\s+/g, '');
       return '<tr>' +
         '<td data-label="Learner" class="td-strong">' + esc(b.name) + '</td>' +
-        '<td data-label="Grade &amp; Room" class="td-muted">Grade ' + b.grade + ' • Room ' + b.room + '</td>' +
+        '<td data-label="Grade &amp; Room" class="td-muted">Grade ' + b.grade + ' • ' + esc(roomLabel(b.room)) + '</td>' +
         '<td data-label="Parent / Guardian">' + esc(p.name) + ' • ' + esc(p.phone || DEFAULT_PHONE) + ' • ' + esc(p.relation) +
-          '<br><span class="td-muted">Primary Contact: ' + esc(p.phone || DEFAULT_PHONE) + '</span></td>' +
+          ((p.altPhone || p.email) ? '<br><span class="td-muted">' + esc(p.altPhone || '') + (p.email ? ' • ' + esc(p.email) : '') + '</span>' : '') + '</td>' +
         '<td data-label="Quick Actions"><div class="row" style="gap:8px">' +
           '<a class="btn btn--green btn--sm" href="tel:' + esc(tel) + '">📞 Call Parent</a>' +
-          '<button class="btn btn--ghost btn--sm" data-action="edit-parent" data-id="' + b.id + '">Edit</button>' +
+          (isOwner() ? '<button class="btn btn--ghost btn--sm" data-action="edit-learner" data-id="' + b.id + '">Edit</button>' : '') +
         '</div></td>' +
         '</tr>';
     }).join('');
@@ -478,6 +711,7 @@
       '<div class="filterbar" style="grid-template-columns:1fr">' +
         '<div class="searchwrap"><input type="text" id="parentSearch" placeholder="Search learner, parent or number…" value="' + esc(ui.parentSearch) + '"></div>' +
       '</div>' +
+      (isOwner() ? '' : '<div class="notice">Only ' + esc(OWNER_NAME) + ' can edit learner or parent details.</div>') +
       '<section class="card"><div class="tablewrap"><table class="responsive"><thead><tr>' +
         '<th>Learner Name</th><th>Grade &amp; Room</th><th>Parent / Guardian Details</th><th>Quick Actions</th>' +
       '</tr></thead><tbody>' + (rows || '<tr><td colspan="4" class="empty">No matching records.</td></tr>') + '</tbody></table></div></section>';
@@ -496,16 +730,19 @@
       var badge = b.status === 'confirmed'
         ? '<span class="pill pill--green">Confirmed</span>'
         : (b.status === 'declined' ? '<span class="pill pill--red">Declined</span>' : '<span class="pill pill--amber">Pending</span>');
+      var actions = isOwner()
+        ? '<div class="row" style="gap:8px">' +
+            '<button class="btn btn--green btn--sm" data-action="booking-status" data-id="' + b.id + '" data-status="confirmed">Confirm</button>' +
+            '<button class="btn btn--ghost btn--sm" data-action="booking-status" data-id="' + b.id + '" data-status="pending">Pending</button>' +
+            '<button class="btn btn--red btn--sm" data-action="booking-delete" data-id="' + b.id + '">Delete</button>' +
+          '</div>'
+        : '<span class="td-muted">View only</span>';
       return '<tr>' +
         '<td data-label="Learner" class="td-strong">' + esc(b.learner) + '<br><span class="td-muted" style="font-weight:500">Grade ' + esc(b.grade) + '</span></td>' +
         '<td data-label="Parent" class="td-muted">' + esc(b.parent) + ' • ' + esc(b.phone) + '</td>' +
         '<td data-label="Status">' + badge + '</td>' +
         '<td data-label="Submitted" class="td-muted">' + esc(prettyDate(b.submitted)) + '</td>' +
-        '<td data-label="Actions"><div class="row" style="gap:8px">' +
-          '<button class="btn btn--green btn--sm" data-action="booking-status" data-id="' + b.id + '" data-status="confirmed">Confirm</button>' +
-          '<button class="btn btn--ghost btn--sm" data-action="booking-status" data-id="' + b.id + '" data-status="pending">Pending</button>' +
-          '<button class="btn btn--red btn--sm" data-action="booking-status" data-id="' + b.id + '" data-status="declined">Decline</button>' +
-        '</div></td>' +
+        '<td data-label="Actions">' + actions + '</td>' +
         '</tr>';
     }).join('');
 
@@ -515,7 +752,7 @@
         '<p>Capture and track 2027 hostel applications, confirm placements and keep parent contacts on file.</p>' +
       '</div>' +
       '<div class="row" style="margin-bottom:16px">' +
-        '<button class="btn btn--primary" data-action="add-booking">＋ New 2027 Booking</button>' +
+        (isOwner() ? '<button class="btn btn--primary" data-action="add-booking">＋ New 2027 Booking</button>' : '') +
         '<button class="btn btn--ghost" data-action="export-report">⬇ Export Report</button>' +
       '</div>' +
       '<div class="stats" style="grid-template-columns:repeat(3,1fr)">' +
@@ -531,27 +768,113 @@
       '</tr></thead><tbody>' + (rows || '<tr><td colspan="5" class="empty">No bookings captured yet.</td></tr>') + '</tbody></table></div></section>';
   }
 
+  /* ---- Broadcast ---- */
+  function renderBroadcast() {
+    var list = state.messages.slice().reverse();
+    var items = list.length ? list.map(function (m) {
+      return '<div class="msg">' +
+        '<div class="msg__text">' + esc(m.text) + '</div>' +
+        '<div class="msg__meta">' + esc(m.staff) + ' • ' + esc(new Date(m.at).toLocaleString()) +
+          (isOwner() ? '<button class="linkbtn msg__del" data-action="msg-delete" data-id="' + m.id + '">Delete</button>' : '') +
+        '</div>' +
+        '</div>';
+    }).join('') : '<p class="empty">No messages sent yet.</p>';
+
+    return '' +
+      '<div class="section-head">' +
+        '<h2>Broadcast to all users</h2>' +
+        '<p>Send a message to every phone signed in to the hostel app.</p>' +
+      '</div>' +
+      '<section class="card">' +
+        '<div class="card__head"><h3>New message</h3></div>' +
+        '<div class="field"><label>Sending as</label><input type="text" value="' + esc(currentStaffName()) + '" disabled></div>' +
+        '<div class="field"><label>Message</label><textarea id="msgText" rows="3" placeholder="e.g. All Grade 8s to the common room at 18:00."></textarea></div>' +
+        '<button class="btn btn--primary" data-action="msg-send">📣 Send to all users</button>' +
+      '</section>' +
+      '<section class="card">' +
+        '<div class="card__head"><h3>Message history</h3></div>' +
+        items +
+      '</section>';
+  }
+
+  /* ---- Admin (owner only) ---- */
+  function renderAdmin() {
+    if (!isOwner()) {
+      return '<section class="card"><p class="empty">Only ' + esc(OWNER_NAME) + ' can open administration.</p></section>';
+    }
+    var rows = state.staff.map(function (s) {
+      return '<tr>' +
+        '<td data-label="Staff member" class="td-strong">' + esc(s.name) +
+          '<br><span class="td-muted" style="font-weight:500">' + (s.role === 'owner' ? 'Owner — full control' : 'Staff') + '</span></td>' +
+        '<td data-label="PIN">' + (s.pin ? '<span class="pill pill--green">Set</span>' : '<span class="pill pill--amber">Not set</span>') + '</td>' +
+        '<td data-label="Status">' + (s.active === false ? '<span class="pill pill--muted">Disabled</span>' : '<span class="pill pill--green">Active</span>') + '</td>' +
+        '<td data-label="Actions"><div class="row" style="gap:8px">' +
+          '<button class="btn btn--ghost btn--sm" data-action="staff-pin" data-id="' + s.id + '">Set PIN</button>' +
+          (s.role === 'owner' ? '<button class="btn btn--ghost btn--sm" data-action="staff-rename" data-id="' + s.id + '">Rename</button>'
+            : '<button class="btn btn--ghost btn--sm" data-action="staff-rename" data-id="' + s.id + '">Rename</button>' +
+              '<button class="btn btn--ghost btn--sm" data-action="staff-toggle" data-id="' + s.id + '">' + (s.active === false ? 'Enable' : 'Disable') + '</button>' +
+              '<button class="btn btn--red btn--sm" data-action="staff-delete" data-id="' + s.id + '">Remove</button>') +
+        '</div></td>' +
+        '</tr>';
+    }).join('');
+
+    return '' +
+      '<div class="section-head">' +
+        '<h2>Administration</h2>' +
+        '<p>Owner controls — staff accounts, the hostel passcode and the shared data link.</p>' +
+      '</div>' +
+
+      '<section class="card">' +
+        '<div class="card__head"><h3>Staff accounts</h3></div>' +
+        '<p class="card__hint" style="margin-bottom:12px">Every staff member signs in with their own name and personal PIN.</p>' +
+        '<div class="tablewrap"><table class="responsive"><thead><tr>' +
+          '<th>Staff member</th><th>PIN</th><th>Status</th><th>Actions</th>' +
+        '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+        '<div style="margin-top:12px"><button class="btn btn--gold" data-action="staff-add">＋ Add staff member</button></div>' +
+      '</section>' +
+
+      '<section class="card">' +
+        '<div class="card__head"><h3>Hostel settings</h3></div>' +
+        '<div class="field"><label>Duty officer</label><input type="text" id="setDuty" value="' + esc(state.settings.duty || '') + '"></div>' +
+        '<div class="field"><label>Hostel passcode (shared gate)</label><input type="text" id="setPass" value="' + esc(state.settings.passcode || DEFAULT_PASSCODE) + '"></div>' +
+        '<div class="modal__actions">' +
+          '<button class="btn btn--primary" data-action="settings-save">Save settings</button>' +
+        '</div>' +
+      '</section>' +
+
+      '<section class="card">' +
+        '<div class="card__head"><h3>Shared data</h3></div>' +
+        '<p class="card__hint">Every phone signed in reads and writes the same live dataset, so information saved on one phone appears on all of them.</p>' +
+        '<div class="row" style="margin-top:10px">' +
+          '<button class="btn btn--ghost" data-action="sync-now">↻ Sync now</button>' +
+        '</div>' +
+      '</section>';
+  }
+
   function render(scrollTop) {
     var out = '';
     switch (ui.view) {
       case 'merits': out = renderMerits(); break;
       case 'attendance': out = renderAttendance(); break;
       case 'rooms': out = renderRooms(); break;
+      case 'roomsAdmin': out = isOwner() ? renderRoomsAdmin() : renderDashboard(); break;
       case 'parents': out = renderParents(); break;
       case 'bookings': out = renderBookings(); break;
+      case 'broadcast': out = renderBroadcast(); break;
+      case 'admin': out = renderAdmin(); break;
       default: out = renderDashboard();
     }
+    if ((ui.view === 'roomsAdmin' || ui.view === 'admin') && !isOwner()) ui.view = 'dashboard';
     $('#app').innerHTML = out;
 
-    // keep the tab bar in sync
-    Array.prototype.forEach.call(document.querySelectorAll('.tab'), function (t) {
+    $$('.tab').forEach(function (t) {
       t.classList.toggle('is-active', t.dataset.view === ui.view);
     });
     if (scrollTop) window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   /* ---------------------------------------------------------
-     7. ACTIONS
+     9. ACTIONS
      --------------------------------------------------------- */
   function logIncident(boarderId, type, note) {
     var meta = INCIDENT_TYPES[type];
@@ -559,7 +882,7 @@
     if (!b || !meta) return;
     state.incidents.push({
       id: uid('inc'), boarderId: boarderId, type: type, points: meta.points,
-      note: note || '', staff: state.settings.staff, at: new Date().toISOString()
+      note: note || '', staff: currentStaffName(), at: new Date().toISOString()
     });
     saveState();
     toast(meta.label + ' logged for ' + b.name);
@@ -572,16 +895,15 @@
     var prev = rec.status || 'present';
     rec.status = status;
     day[boarderId] = rec;
-    // a new late-coming automatically logs the -2 point incident (once per day)
     if (status === 'late' && prev !== 'late') {
       state.incidents.push({
         id: uid('inc'), boarderId: boarderId, type: 'late', points: INCIDENT_TYPES.late.points,
-        note: rec.lateTime || 'Flagged at roll call', staff: state.settings.staff, at: new Date().toISOString()
+        note: rec.lateTime || 'Flagged at roll call', staff: currentStaffName(), at: new Date().toISOString()
       });
       toast('Late coming logged (−2 pts)');
     } else if (status !== 'late' && prev === 'late') {
       state.incidents = state.incidents.filter(function (i) {
-        return !(i.boarderId === boarderId && i.type === 'late' && i.at.slice(0, 10) === todayKey());
+        return !(i.boarderId === boarderId && i.type === 'late' && String(i.at).slice(0, 10) === todayKey());
       });
       toast('Late coming cleared');
     } else {
@@ -597,20 +919,24 @@
     var prev = rec.status || 'tidy';
     rec.status = status;
     day[room] = rec;
-    var b = state.boarders.find(function (x) { return x.room === Number(room); });
-    if (status === 'untidy' && prev !== 'untidy' && b) {
-      state.incidents.push({
-        id: uid('inc'), boarderId: b.id, type: 'room', points: INCIDENT_TYPES.room.points,
-        note: 'Room ' + room + ' not tidy', staff: state.settings.staff, at: new Date().toISOString()
+    var occ = occupantsOf(room);
+    var today = todayKey();
+    if (status === 'untidy' && prev !== 'untidy') {
+      occ.forEach(function (b) {
+        state.incidents.push({
+          id: uid('inc'), boarderId: b.id, type: 'room', points: INCIDENT_TYPES.room.points,
+          note: roomLabel(room) + ' not tidy', staff: currentStaffName(), at: new Date().toISOString()
+        });
       });
-      toast('Untidy room logged (−1 pt)');
-    } else if (status === 'tidy' && prev === 'untidy' && b) {
+      toast(occ.length ? 'Untidy room logged (−1 pt each)' : 'Room ' + room + ' flagged untidy (no learners in room)');
+    } else if (status === 'tidy' && prev === 'untidy') {
+      var ids = occ.map(function (b) { return b.id; });
       state.incidents = state.incidents.filter(function (i) {
-        return !(i.boarderId === b.id && i.type === 'room' && i.at.slice(0, 10) === todayKey());
+        return !(ids.indexOf(i.boarderId) > -1 && i.type === 'room' && String(i.at).slice(0, 10) === today);
       });
       toast('Room marked tidy');
     } else {
-      toast('Room ' + room + ' marked ' + status);
+      toast(roomLabel(room) + ' marked ' + status);
     }
     saveState();
     render();
@@ -641,7 +967,7 @@
       rec.photo = dataUrl;
       day[photoTarget] = rec;
       saveState();
-      toast('Photo saved to Room ' + photoTarget);
+      toast('Photo saved to ' + roomLabel(photoTarget));
       render();
     });
   }
@@ -675,14 +1001,14 @@
     lines.push(['Motto', MOTTO]);
     lines.push(['Generated', new Date().toLocaleString()]);
     lines.push(['Duty', state.settings.duty]);
-    lines.push(['Staff', state.settings.staff]);
-    lines.push(['Access level', 'Admin (all users)']);
+    lines.push(['Signed in', currentStaffName()]);
+    lines.push(['Access level', isOwner() ? 'Owner (full control)' : 'Staff']);
     lines.push([]);
 
     lines.push(['Merit & Demerit Ledger']);
     lines.push(['Boarder', 'Grade', 'Room', 'Net Points', 'Incidents', 'Recent Note']);
     state.boarders.forEach(function (b) {
-      lines.push([b.name, b.grade, b.room, netPoints(b), incidentsFor(b.id).length, recentIncidentText(b.id)]);
+      lines.push([b.name, b.grade, roomLabel(b.room), netPoints(b), incidentsFor(b.id).length, recentIncidentText(b.id)]);
     });
     lines.push([]);
 
@@ -690,15 +1016,16 @@
     lines.push(['Boarder', 'Grade', 'Room', 'Status', 'Late Time / Notes']);
     state.boarders.forEach(function (b) {
       var rec = attendanceFor(ui.attDate)[b.id] || {};
-      lines.push([b.name, b.grade, b.room, attStatus(b, ui.attDate), rec.lateTime || '']);
+      lines.push([b.name, b.grade, roomLabel(b.room), attStatus(b, ui.attDate), rec.lateTime || '']);
     });
     lines.push([]);
 
     lines.push(['Room Inspections — ' + prettyDate(ui.roomDate)]);
-    lines.push(['Room', 'Boarder', 'Status', 'Photo Captured', 'Notes']);
-    state.boarders.forEach(function (b) {
-      var rec = roomChecksFor(ui.roomDate)[b.room] || {};
-      lines.push(['Room ' + b.room, b.name, rec.status || 'tidy', rec.photo ? 'Yes' : 'No', rec.note || '']);
+    lines.push(['Room', 'Occupants', 'Status', 'Photo Captured', 'Notes']);
+    state.rooms.forEach(function (r) {
+      var rec = roomChecksFor(ui.roomDate)[r.number] || {};
+      var occ = occupantsOf(r.number).map(function (b) { return b.name; }).join(' / ');
+      lines.push([r.label, occ || 'Unoccupied', rec.status || 'tidy', rec.photo ? 'Yes' : 'No', rec.note || '']);
     });
     lines.push([]);
 
@@ -721,11 +1048,11 @@
   }
 
   /* ---------------------------------------------------------
-     8. MODALS
+     10. MODALS
      --------------------------------------------------------- */
   function logPicker() {
     var opts = state.boarders.map(function (b) {
-      return '<option value="' + b.id + '">' + esc(b.name) + ' — Grade ' + b.grade + ' • Room ' + b.room + '</option>';
+      return '<option value="' + b.id + '">' + esc(b.name) + ' — Grade ' + b.grade + ' • ' + esc(roomLabel(b.room)) + '</option>';
     }).join('');
     openModal('Log Merit / Demerit', '' +
       '<div class="field"><label>Boarder</label><select id="lgBoarder">' + opts + '</select></div>' +
@@ -748,13 +1075,24 @@
         });
       });
   }
-
   function logForBoarder(id) { ui.pendingBoarder = id; logPicker(); }
 
-  function editParentModal(boarderId) {
+  /* One modal for everything about a learner and their parent (owner only) */
+  function editLearnerModal(boarderId) {
+    if (!requireOwner()) return;
     var b = state.boarders.find(function (x) { return x.id === boarderId; });
+    if (!b) return;
     var p = state.parents[b.parentId] || {};
-    openModal('Parent / Guardian — ' + b.name, '' +
+    openModal('Learner record — ' + b.name, '' +
+      '<div class="field"><label>Learner name</label><input type="text" id="lnName" value="' + esc(b.name) + '"></div>' +
+      '<div class="inline-fields">' +
+        '<div class="field"><label>Grade</label><select id="lnGrade">' +
+          [8, 9, 10, 11, 12].map(function (g) {
+            return '<option value="' + g + '"' + (Number(b.grade) === g ? ' selected' : '') + '>Grade ' + g + '</option>';
+          }).join('') + '</select></div>' +
+        '<div class="field"><label>Room placement</label><select id="lnRoom">' + roomOptions(b.room) + '</select></div>' +
+      '</div>' +
+      '<hr style="border:none;border-top:1px solid var(--line);margin:14px 0">' +
       '<div class="field"><label>Parent / Guardian name</label><input type="text" id="pnName" value="' + esc(p.name || '') + '"></div>' +
       '<div class="field"><label>Relationship</label><input type="text" id="pnRel" value="' + esc(p.relation || '') + '"></div>' +
       '<div class="inline-fields">' +
@@ -764,10 +1102,15 @@
       '<div class="field"><label>Email</label><input type="text" id="pnEmail" value="' + esc(p.email || '') + '"></div>' +
       '<div class="field"><label>Note</label><input type="text" id="pnNote" value="' + esc(p.note || '') + '"></div>' +
       '<div class="modal__actions">' +
-        '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
-        '<button class="btn btn--primary" id="pnSave" type="button">Save</button>' +
+        '<button class="btn btn--red" id="lnDelete" type="button">Remove learner</button>' +
+        '<button class="btn btn--primary" id="lnSave" type="button">Save</button>' +
       '</div>', function (body) {
-        $('#pnSave', body).addEventListener('click', function () {
+        $('#lnSave', body).addEventListener('click', function () {
+          var name = $('#lnName', body).value.trim();
+          if (!name) { toast('Enter the learner name'); return; }
+          b.name = name;
+          b.grade = Number($('#lnGrade', body).value);
+          b.room = Number($('#lnRoom', body).value);
           state.parents[b.parentId] = {
             name: $('#pnName', body).value.trim(),
             relation: $('#pnRel', body).value.trim(),
@@ -776,12 +1119,162 @@
             email: $('#pnEmail', body).value.trim(),
             note: $('#pnNote', body).value.trim()
           };
-          saveState(); closeModal(); toast('Parent details updated'); render();
+          saveState(); closeModal(); toast('Learner record updated'); render();
+        });
+        $('#lnDelete', body).addEventListener('click', function () {
+          if (!confirm('Remove ' + b.name + ' from the hostel? This deletes their record.')) return;
+          state.boarders = state.boarders.filter(function (x) { return x.id !== b.id; });
+          delete state.parents[b.parentId];
+          state.incidents = state.incidents.filter(function (i) { return i.boarderId !== b.id; });
+          saveState(); closeModal(); toast('Learner removed'); render();
         });
       });
   }
 
+  function moveModal(boarderId) {
+    if (!requireOwner()) return;
+    var b = state.boarders.find(function (x) { return x.id === boarderId; });
+    if (!b) return;
+    openModal('Move ' + b.name, '' +
+      '<div class="field"><label>Currently in</label><input type="text" value="' + esc(roomLabel(b.room)) + '" disabled></div>' +
+      '<div class="field"><label>Move to</label><select id="mvRoom">' + roomOptions(b.room) + '</select></div>' +
+      '<div class="modal__actions">' +
+        '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
+        '<button class="btn btn--primary" id="mvSave" type="button">Move learner</button>' +
+      '</div>', function (body) {
+        $('#mvSave', body).addEventListener('click', function () {
+          var target = Number($('#mvRoom', body).value);
+          b.room = target;
+          saveState(); closeModal();
+          toast(b.name + ' moved to ' + roomLabel(target));
+          render();
+        });
+      });
+  }
+
+  function roomManageModal(roomNumber) {
+    if (!requireOwner()) return;
+    var occ = occupantsOf(roomNumber);
+    var inner = occ.length
+      ? occ.map(function (b) {
+          return '<div class="occur">' +
+            '<span class="occur__name">' + esc(b.name) + '<br><span class="td-muted" style="font-weight:500">Grade ' + b.grade + '</span></span>' +
+            '<button class="btn btn--ghost btn--sm" data-action="move" data-id="' + b.id + '" data-close-first="1">Move</button>' +
+            '</div>';
+        }).join('')
+      : '<p class="empty">This room is empty.</p>';
+
+    var free = state.boarders.filter(function (b) { return Number(b.room) !== Number(roomNumber); });
+    var addOpts = free.length
+      ? free.map(function (b) { return '<option value="' + b.id + '">' + esc(b.name) + ' — ' + esc(roomLabel(b.room)) + '</option>'; }).join('')
+      : '';
+
+    openModal(roomLabel(roomNumber) + ' — placement', '' +
+      '<p class="card__hint" style="margin-bottom:10px">Move learners out, or place another learner into this room.</p>' +
+      inner +
+      (addOpts ? (
+        '<div class="field" style="margin-top:14px"><label>Place a learner into ' + esc(roomLabel(roomNumber)) + '</label>' +
+        '<select id="rmAdd">' + addOpts + '</select></div>' +
+        '<div class="modal__actions"><button class="btn btn--primary" id="rmAddGo" type="button">Place in room</button></div>'
+      ) : '<p class="card__hint" style="margin-top:14px">Every learner is already in this room.</p>'), function (body) {
+        var go = $('#rmAddGo', body);
+        if (go) go.addEventListener('click', function () {
+          var b = state.boarders.find(function (x) { return x.id === $('#rmAdd', body).value; });
+          if (!b) return;
+          b.room = Number(roomNumber);
+          saveState(); closeModal();
+          toast(b.name + ' placed in ' + roomLabel(roomNumber));
+          render();
+        });
+      });
+  }
+
+  function addLearnerModal() {
+    if (!requireOwner()) return;
+    openModal('Add Learner', '' +
+      '<div class="field"><label>Learner name</label><input type="text" id="alName" placeholder="Surname, First name"></div>' +
+      '<div class="inline-fields">' +
+        '<div class="field"><label>Grade</label><select id="alGrade">' +
+          [8, 9, 10, 11, 12].map(function (g) { return '<option value="' + g + '">Grade ' + g + '</option>'; }).join('') +
+        '</select></div>' +
+        '<div class="field"><label>Room</label><select id="alRoom">' + roomOptions(1) + '</select></div>' +
+      '</div>' +
+      '<div class="field"><label>Parent / Guardian</label><input type="text" id="alParent" placeholder="Mr/Ms Surname"></div>' +
+      '<div class="field"><label>Parent contact number</label><input type="tel" id="alPhone" value="' + DEFAULT_PHONE + '"></div>' +
+      '<div class="modal__actions">' +
+        '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
+        '<button class="btn btn--primary" id="alSave" type="button">Add learner</button>' +
+      '</div>', function (body) {
+        $('#alSave', body).addEventListener('click', function () {
+          var name = $('#alName', body).value.trim();
+          if (!name) { toast('Enter the learner name'); return; }
+          var bid = uid('b'), pid = uid('p');
+          state.boarders.push({
+            id: bid, name: name, grade: Number($('#alGrade', body).value),
+            room: Number($('#alRoom', body).value), parentId: pid
+          });
+          state.parents[pid] = {
+            name: $('#alParent', body).value.trim() || 'Mr/Ms ' + surnameOf(name),
+            relation: 'Parent/Guardian',
+            phone: $('#alPhone', body).value.trim() || DEFAULT_PHONE,
+            altPhone: '', email: '', note: ''
+          };
+          saveState(); closeModal(); toast('Learner added'); render();
+        });
+      });
+  }
+
+  function roomAddModal() {
+    if (!requireOwner()) return;
+    var next = state.rooms.reduce(function (m, r) { return Math.max(m, Number(r.number)); }, 0) + 1;
+    openModal('Add Room', '' +
+      '<div class="inline-fields">' +
+        '<div class="field"><label>Room number</label><input type="number" id="raNum" value="' + next + '" min="1"></div>' +
+        '<div class="field"><label>Room name</label><input type="text" id="raLabel" value="Room ' + next + '"></div>' +
+      '</div>' +
+      '<div class="modal__actions">' +
+        '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
+        '<button class="btn btn--primary" id="raSave" type="button">Add room</button>' +
+      '</div>', function (body) {
+        $('#raSave', body).addEventListener('click', function () {
+          var num = Number($('#raNum', body).value);
+          if (!num || num < 1) { toast('Enter a room number'); return; }
+          if (state.rooms.some(function (r) { return Number(r.number) === num; })) { toast('That room number already exists'); return; }
+          state.rooms.push({ number: num, label: $('#raLabel', body).value.trim() || 'Room ' + num });
+          saveState(); closeModal(); toast('Room added'); render();
+        });
+      });
+  }
+
+  function roomEditModal(roomNumber) {
+    if (!requireOwner()) return;
+    var r = state.rooms.find(function (x) { return Number(x.number) === Number(roomNumber); });
+    if (!r) return;
+    openModal('Rename ' + r.label, '' +
+      '<div class="field"><label>Room name</label><input type="text" id="reLabel" value="' + esc(r.label) + '"></div>' +
+      '<div class="modal__actions">' +
+        '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
+        '<button class="btn btn--primary" id="reSave" type="button">Save</button>' +
+      '</div>', function (body) {
+        $('#reSave', body).addEventListener('click', function () {
+          r.label = $('#reLabel', body).value.trim() || r.label;
+          saveState(); closeModal(); toast('Room renamed'); render();
+        });
+      });
+  }
+
+  function roomDelete(roomNumber) {
+    if (!requireOwner()) return;
+    var r = state.rooms.find(function (x) { return Number(x.number) === Number(roomNumber); });
+    if (!r) return;
+    var occ = occupantsOf(roomNumber);
+    if (!confirm('Remove ' + r.label + ' from the room list?' + (occ.length ? ' ' + occ.length + ' learner(s) are still placed there and will keep the room number until you move them.' : ''))) return;
+    state.rooms = state.rooms.filter(function (x) { return Number(x.number) !== Number(roomNumber); });
+    saveState(); toast('Room removed'); render();
+  }
+
   function bookingModal() {
+    if (!requireOwner()) return;
     openModal('New 2027 Booking', '' +
       '<div class="field"><label>Learner name</label><input type="text" id="bkName" placeholder="Surname, First name"></div>' +
       '<div class="inline-fields">' +
@@ -812,32 +1305,80 @@
       });
   }
 
-  function freshStartModal() {
-    openModal('Fresh Start — New Shift', '' +
-      '<p class="card__hint" style="margin-bottom:14px">Start a new duty shift. This stamps a new shift time and updates the staff name on the badge. Recorded data is kept.</p>' +
-      '<div class="field"><label>Staff name (on the Active Staff Badge)</label><input type="text" id="fsStaff" value="' + esc(state.settings.staff === 'Fresh Start' ? '' : state.settings.staff) + '" placeholder="e.g. D. Smit"></div>' +
-      '<div class="field"><label>Duty officer</label><input type="text" id="fsDuty" value="' + esc(state.settings.duty || '') + '"></div>' +
-      '<div class="field"><label>Access level</label><input type="text" value="Admin (all users are admins)" disabled></div>' +
+  function staffAddModal() {
+    if (!requireOwner()) return;
+    openModal('Add staff member', '' +
+      '<div class="field"><label>Full name</label><input type="text" id="stName" placeholder="e.g. J. Molefe"></div>' +
+      '<div class="field"><label>Personal PIN (at least 4 digits)</label><input type="text" id="stPin" inputmode="numeric" placeholder="e.g. 4821"></div>' +
       '<div class="modal__actions">' +
         '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
-        '<button class="btn btn--primary" id="fsSave" type="button">Start Shift</button>' +
+        '<button class="btn btn--primary" id="stSave" type="button">Add staff</button>' +
       '</div>', function (body) {
-        $('#fsSave', body).addEventListener('click', function () {
-          var s = $('#fsStaff', body).value.trim();
-          state.settings.staff = s || 'Fresh Start';
-          state.settings.duty = $('#fsDuty', body).value.trim() || state.settings.duty;
-          state.settings.role = 'admin';
-          state.settings.shiftStarted = new Date().toISOString();
-          saveState(); closeModal(); syncHeader(); toast('Fresh shift started'); render();
+        $('#stSave', body).addEventListener('click', function () {
+          var name = $('#stName', body).value.trim();
+          var pin = $('#stPin', body).value.trim();
+          if (!name) { toast('Enter the staff member\'s name'); return; }
+          if (pin.length < 4) { toast('PIN must be at least 4 digits'); return; }
+          state.staff.push({ id: uid('s'), name: name, pin: pin, role: 'staff', active: true });
+          saveState(); closeModal(); toast('Staff member added'); render();
         });
       });
+  }
+
+  function staffPinModal(id) {
+    if (!requireOwner()) return;
+    var s = state.staff.find(function (x) { return x.id === id; });
+    if (!s) return;
+    openModal('PIN for ' + s.name, '' +
+      '<div class="field"><label>New PIN (at least 4 digits)</label><input type="text" id="spPin" inputmode="numeric" placeholder="••••"></div>' +
+      '<div class="modal__actions">' +
+        '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
+        '<button class="btn btn--primary" id="spSave" type="button">Save PIN</button>' +
+      '</div>', function (body) {
+        $('#spSave', body).addEventListener('click', function () {
+          var pin = $('#spPin', body).value.trim();
+          if (pin.length < 4) { toast('PIN must be at least 4 digits'); return; }
+          s.pin = pin;
+          saveState(); closeModal(); toast('PIN updated for ' + s.name); render();
+        });
+      });
+  }
+
+  function staffRenameModal(id) {
+    if (!requireOwner()) return;
+    var s = state.staff.find(function (x) { return x.id === id; });
+    if (!s) return;
+    openModal('Rename staff member', '' +
+      '<div class="field"><label>Name</label><input type="text" id="srName" value="' + esc(s.name) + '"></div>' +
+      '<div class="modal__actions">' +
+        '<button class="btn btn--ghost" data-close type="button">Cancel</button>' +
+        '<button class="btn btn--primary" id="srSave" type="button">Save</button>' +
+      '</div>', function (body) {
+        $('#srSave', body).addEventListener('click', function () {
+          var name = $('#srName', body).value.trim();
+          if (!name) { toast('Enter a name'); return; }
+          s.name = name;
+          if (session && session.id === s.id) { session.name = name; }
+          saveState(); closeModal(); syncHeader(); toast('Staff member renamed'); render();
+        });
+      });
+  }
+
+  function signOut() {
+    session = null;
+    localStorage.removeItem(SESSION_KEY);
+    gateStep = 'pass';
+    closeModal();
+    stopPolling();
+    setSync('local', 'Signed out');
+    renderGate();
   }
 
   function viewPhotoModal(room) {
     var rec = roomChecksFor(ui.roomDate)[room] || {};
     if (!rec.photo) return;
-    openModal('Room ' + room + ' — Inspection Photo', '' +
-      '<img src="' + rec.photo + '" alt="Room ' + room + '" style="width:100%;border-radius:12px;border:1px solid var(--line)">' +
+    openModal(roomLabel(room) + ' — Inspection Photo', '' +
+      '<img src="' + rec.photo + '" alt="' + esc(roomLabel(room)) + '" style="width:100%;border-radius:12px;border:1px solid var(--line)">' +
       '<p class="card__hint" style="margin-top:10px">' + esc(prettyDate(ui.roomDate)) + ' • Status: ' + esc(rec.status || 'tidy') + (rec.note ? ' • ' + esc(rec.note) : '') + '</p>' +
       '<div class="modal__actions">' +
         '<button class="btn btn--ghost" data-close type="button">Close</button>' +
@@ -851,31 +1392,128 @@
   }
 
   /* ---------------------------------------------------------
-     9. HEADER SYNC
+     11. LOGIN GATE
+     --------------------------------------------------------- */
+  function renderGate() {
+    var el = $('#gate');
+    if (!el) return;
+    if (session) { el.hidden = true; el.innerHTML = ''; return; }
+    el.hidden = false;
+    el.scrollTop = 0;
+
+    var brand = '<div class="gate__brand">' +
+        '<div class="crest">HTS</div>' +
+        '<div><h1>HTS Klerksdorp</h1><p class="gate__motto">' + MOTTO + '</p></div>' +
+      '</div>';
+
+    if (gateStep === 'pass') {
+      el.innerHTML = '<div class="gate__card">' + brand +
+        '<h2 class="gate__title">Hostel staff access</h2>' +
+        '<p class="gate__hint">Enter the hostel passcode to continue.</p>' +
+        '<div class="field"><label>Hostel passcode</label><input type="password" id="gatePass" inputmode="numeric" placeholder="••••"></div>' +
+        '<div class="gate__err" id="gateErr">' + esc(gateError || '') + '</div>' +
+        '<button class="btn btn--gold gate__btn" id="gateGo" type="button">Unlock</button>' +
+        '</div>';
+      var input = $('#gatePass');
+      input.focus();
+      function tryPass() {
+        var v = input.value.trim();
+        if (v === String(state.settings.passcode || DEFAULT_PASSCODE)) {
+          gateStep = 'who'; gateError = ''; renderGate();
+        } else {
+          gateError = 'Incorrect passcode. Please try again.';
+          renderGate();
+        }
+      }
+      $('#gateGo').addEventListener('click', tryPass);
+      input.addEventListener('keydown', function (e) { if (e.key === 'Enter') tryPass(); });
+      return;
+    }
+
+    var active = state.staff.filter(function (s) { return s.active !== false; });
+    var opts = active.map(function (s) {
+      return '<option value="' + s.id + '" data-nopin="' + (s.pin ? '0' : '1') + '">' +
+        esc(s.name) + (s.role === 'owner' ? ' (Owner)' : '') + '</option>';
+    }).join('');
+
+    el.innerHTML = '<div class="gate__card">' + brand +
+      '<h2 class="gate__title">Sign in</h2>' +
+      '<p class="gate__hint">Choose your name and enter your personal PIN.</p>' +
+      '<div class="field"><label>Staff member</label><select id="gateWho">' + opts + '</select></div>' +
+      '<div class="field"><label id="gatePinLabel">Personal PIN</label><input type="password" id="gatePin" inputmode="numeric" placeholder="••••"></div>' +
+      '<div class="gate__err" id="gateErr">' + esc(gateError || '') + '</div>' +
+      '<button class="btn btn--gold gate__btn" id="gateSignIn" type="button">Sign in</button>' +
+      '<button class="linkbtn gate__back" id="gateBack" type="button">← Back to passcode</button>' +
+      '<p class="gate__hint" style="margin-top:12px">New here? Ask ' + esc(OWNER_NAME) + ' to add you and set your PIN.</p>' +
+      '</div>';
+
+    var who = $('#gateWho'), pin = $('#gatePin'), label = $('#gatePinLabel');
+    function refreshLabel() {
+      var o = who.options[who.selectedIndex];
+      var noPin = o && o.dataset.nopin === '1';
+      label.textContent = noPin ? 'Create your PIN (4+ digits)' : 'Personal PIN';
+    }
+    who.addEventListener('change', refreshLabel);
+    refreshLabel();
+
+    function trySignIn() {
+      var s = state.staff.find(function (x) { return x.id === who.value; });
+      if (!s) return;
+      var v = pin.value.trim();
+      if (!s.pin) {
+        if (v.length < 4) { gateError = 'Choose a PIN with at least 4 digits.'; renderGate(); return; }
+        s.pin = v;
+      } else if (v !== String(s.pin)) {
+        gateError = 'Incorrect PIN. Please try again.'; renderGate(); return;
+      }
+      session = { id: s.id, name: s.name, role: s.role };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      gateError = '';
+      saveState();                 // stores the new PIN + shares it
+      renderGate();                // hides the gate
+      syncHeader();
+      render(true);
+      startPolling();
+      pullOnce(true);
+      toast('Welcome, ' + s.name);
+    }
+    $('#gateSignIn').addEventListener('click', trySignIn);
+    pin.addEventListener('keydown', function (e) { if (e.key === 'Enter') trySignIn(); });
+    $('#gateBack').addEventListener('click', function () { gateStep = 'pass'; gateError = ''; renderGate(); });
+  }
+  var gateError = '';
+
+  /* ---------------------------------------------------------
+     12. HEADER SYNC
      --------------------------------------------------------- */
   function syncHeader() {
     $('#dutyName').textContent = state.settings.duty || '—';
-    $('#staffName').textContent = state.settings.staff || 'Fresh Start';
-    $('#adminBadge').title = 'Access level: Admin (all users)';
+    $('#staffName').textContent = session ? session.name : '—';
+    var badge = $('#adminBadge');
+    badge.className = 'pill ' + (isOwner() ? 'pill--admin' : 'pill--staff');
+    badge.innerHTML = '<span class="dot"></span> ' + (session ? (isOwner() ? 'Owner — full control' : 'Staff access') : 'Signed out');
+    $$('[data-owner-only]').forEach(function (t) { t.hidden = !isOwner(); });
+    var signout = $('#btnSignOut');
+    if (signout) signout.hidden = !isSignedIn();
   }
 
   /* ---------------------------------------------------------
-     10. EVENT WIRING
+     13. EVENT WIRING
      --------------------------------------------------------- */
   function wireEvents() {
-    // tab navigation
     $('#tabsInner').addEventListener('click', function (e) {
       var t = e.target.closest('.tab');
       if (!t) return;
+      if (t.dataset.ownerOnly && !isOwner()) return;
       ui.view = t.dataset.view;
       render(true);
     });
 
-    // main delegated clicks
     $('#app').addEventListener('click', function (e) {
       var el = e.target.closest('[data-action]');
       if (!el) return;
       var a = el.dataset.action;
+
       if (a === 'go') { ui.view = el.dataset.view; render(true); }
       else if (a === 'log') logForBoarder(el.dataset.id);
       else if (a === 'log-picker') logPicker();
@@ -884,15 +1522,69 @@
       else if (a === 'room') setRoomStatus(el.dataset.room, el.dataset.status);
       else if (a === 'snap') { photoTarget = el.dataset.room; ensureFileInput().click(); }
       else if (a === 'view-photo') viewPhotoModal(el.dataset.room);
-      else if (a === 'edit-parent') editParentModal(el.dataset.id);
+      else if (a === 'edit-learner') editLearnerModal(el.dataset.id);
+      else if (a === 'move') {
+        if (el.dataset.closeFirst) closeModal();
+        moveModal(el.dataset.id);
+      }
+      else if (a === 'add-learner') addLearnerModal();
+      else if (a === 'room-manage') roomManageModal(el.dataset.room);
+      else if (a === 'room-add') roomAddModal();
+      else if (a === 'room-edit') roomEditModal(el.dataset.room);
+      else if (a === 'room-delete') roomDelete(el.dataset.room);
       else if (a === 'add-booking') bookingModal();
       else if (a === 'booking-status') {
+        if (!requireOwner()) return;
         var bk = state.bookings.find(function (x) { return x.id === el.dataset.id; });
         if (bk) { bk.status = el.dataset.status; saveState(); toast('Booking ' + el.dataset.status); render(); }
       }
+      else if (a === 'booking-delete') {
+        if (!requireOwner()) return;
+        var bd = state.bookings.find(function (x) { return x.id === el.dataset.id; });
+        if (!bd) return;
+        if (!confirm('Delete the booking for ' + bd.learner + ' permanently?')) return;
+        state.bookings = state.bookings.filter(function (x) { return x.id !== el.dataset.id; });
+        saveState(); toast('Booking deleted permanently'); render();
+      }
+      else if (a === 'msg-send') {
+        var ta = $('#msgText');
+        var text = ta ? ta.value.trim() : '';
+        if (!text) { toast('Type a message first'); return; }
+        state.messages.push({ id: uid('msg'), text: text, staff: currentStaffName(), at: new Date().toISOString() });
+        saveState(); toast('Broadcast sent to all users'); render();
+      }
+      else if (a === 'msg-delete') {
+        if (!requireOwner()) return;
+        state.messages = state.messages.filter(function (m) { return m.id !== el.dataset.id; });
+        saveState(); toast('Message deleted'); render();
+      }
+      else if (a === 'staff-add') staffAddModal();
+      else if (a === 'staff-pin') staffPinModal(el.dataset.id);
+      else if (a === 'staff-rename') staffRenameModal(el.dataset.id);
+      else if (a === 'staff-toggle') {
+        if (!requireOwner()) return;
+        var st = state.staff.find(function (x) { return x.id === el.dataset.id; });
+        if (st) { st.active = st.active === false; saveState(); toast(st.name + (st.active ? ' enabled' : ' disabled')); render(); }
+      }
+      else if (a === 'staff-delete') {
+        if (!requireOwner()) return;
+        var sd = state.staff.find(function (x) { return x.id === el.dataset.id; });
+        if (!sd) return;
+        if (!confirm('Remove ' + sd.name + ' from the staff list?')) return;
+        state.staff = state.staff.filter(function (x) { return x.id !== el.dataset.id; });
+        saveState(); toast('Staff member removed'); render();
+      }
+      else if (a === 'settings-save') {
+        if (!requireOwner()) return;
+        state.settings.duty = $('#setDuty').value.trim() || state.settings.duty;
+        state.settings.passcode = $('#setPass').value.trim() || DEFAULT_PASSCODE;
+        saveState(); syncHeader(); toast('Settings saved');
+      }
+      else if (a === 'sync-now') {
+        pullOnce().then(function () { doPush(); toast('Sync requested'); });
+      }
     });
 
-    // live filters & text fields
     $('#app').addEventListener('input', function (e) {
       var t = e.target;
       if (t.id === 'meritSearch') { ui.search = t.value; renderPreserveFocus('meritSearch', t.selectionStart); }
@@ -920,20 +1612,23 @@
       else if (t.id === 'roomDate') { ui.roomDate = t.value; render(); }
     });
 
-    $('#btnFreshStart').addEventListener('click', freshStartModal);
+    var so = $('#btnSignOut');
+    if (so) so.addEventListener('click', signOut);
 
-    // modal close handling
     $('#modal').addEventListener('click', function (e) {
       if (e.target.closest('[data-close]')) closeModal();
     });
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') closeModal();
     });
+
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden && isSignedIn()) pullOnce(true);
+    });
+    window.addEventListener('online', function () { setSync('live'); if (isSignedIn()) doPush(); });
+    window.addEventListener('offline', function () { setSync('offline'); });
   }
 
-  function saveStateQuiet() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
-  }
   function renderPreserveFocus(id, pos) {
     render();
     var el = document.getElementById(id);
@@ -941,7 +1636,7 @@
   }
 
   /* ---------------------------------------------------------
-     11. PWA — install prompt + service worker
+     14. PWA — install prompt + service worker
      --------------------------------------------------------- */
   var deferredPrompt = null;
   function wirePWA() {
@@ -974,15 +1669,39 @@
   }
 
   /* ---------------------------------------------------------
-     12. BOOT
+     15. BOOT
      --------------------------------------------------------- */
+  function restoreSession() {
+    try {
+      var raw = localStorage.getItem(SESSION_KEY);
+      if (!raw) return null;
+      var s = JSON.parse(raw);
+      if (!s || !s.id) return null;
+      return s;
+    } catch (e) { return null; }
+  }
+
   function boot() {
-    state = loadState();
-    saveState();               // persist the seeded/upgraded store
-    syncHeader();
+    state = loadLocal();
+
+    var saved = restoreSession();
+    if (saved) {
+      var match = state.staff.find(function (x) { return x.id === saved.id && x.active !== false; });
+      session = match ? { id: match.id, name: match.name, role: match.role } : null;
+      if (!session) localStorage.removeItem(SESSION_KEY);
+    }
+
     wireEvents();
     wirePWA();
-    render(true);
+    syncHeader();
+    setSync(navigator.onLine ? 'local' : 'offline');
+    renderGate();
+
+    if (isSignedIn()) {
+      render(true);
+      startPolling();
+      pullOnce(true);
+    }
   }
 
   if (document.readyState === 'loading') {

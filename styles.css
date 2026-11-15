@@ -160,7 +160,7 @@ tbody tr:hover{background:#fafcfe}
 .pts-zero{color:var(--muted);font-weight:700}
 
 /* ---------- Inputs ---------- */
-select,input[type=text],input[type=tel],input[type=date],input[type=number],textarea{
+select,input[type=text],input[type=tel],input[type=date],input[type=number],input[type=password],textarea{
   width:100%;border:1px solid var(--line);border-radius:10px;padding:11px 12px;
   font-size:14px;background:#fff;color:var(--ink);min-height:var(--tap);font-family:inherit;
 }
@@ -283,3 +283,43 @@ label{display:block;font-size:12.5px;font-weight:700;color:var(--muted);margin:0
   .stat__value{font-size:26px}
   .inline-fields{grid-template-columns:1fr}
 }
+
+/* ============ Login gate ============ */
+.gate{
+  position:fixed;inset:0;z-index:150;overflow-y:auto;
+  background:linear-gradient(160deg,var(--navy) 0%,var(--navy-2) 55%,#0a1f3a 100%);
+  display:flex;align-items:center;justify-content:center;
+  padding:24px 16px calc(24px + env(safe-area-inset-bottom));
+}
+.gate[hidden]{display:none}
+.gate__card{
+  width:100%;max-width:400px;background:#fff;border-radius:18px;padding:22px 20px;
+  box-shadow:0 18px 50px rgba(0,0,0,.35);
+}
+.gate__brand{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+.gate__brand h1{font-size:18px;font-weight:800;color:var(--navy);line-height:1.15}
+.gate__motto{font-size:10px;letter-spacing:3px;color:var(--gold);font-weight:700;margin-top:3px}
+.gate__title{font-size:17px;font-weight:800;color:var(--navy)}
+.gate__hint{font-size:12.5px;color:var(--muted);margin:6px 0 16px}
+.gate__err{color:var(--red);font-size:12.5px;font-weight:600;min-height:18px;margin:-4px 0 8px}
+.gate__btn{width:100%;justify-content:center;margin-top:6px}
+.gate__back{margin:10px auto 0;display:block;text-align:center;width:100%}
+
+/* ============ Broadcast messages ============ */
+.msg{border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px;background:#fafcfe}
+.msg__text{font-size:14px;line-height:1.45;white-space:pre-wrap}
+.msg__meta{
+  display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted);
+  margin-top:8px;font-weight:600;
+}
+.msg__del{margin-left:auto;color:var(--red);font-size:12px;padding:2px 4px;min-height:auto}
+.notice--msg{background:var(--blue-bg);border-color:#c7d9fb;color:#1b3a72}
+.notice--msg strong{color:#12305f}
+
+/* ============ Room placement rows ============ */
+.occur{
+  display:flex;align-items:center;gap:10px;justify-content:space-between;
+  border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:8px;background:#fafcfe;
+}
+.occur__name{font-size:13.5px;font-weight:700}
+

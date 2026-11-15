@@ -31,11 +31,12 @@
   <div class="dutystrip">
     <div class="dutystrip__inner">
       <span class="dutystrip__duty">Duty: <strong id="dutyName">—</strong></span>
-      <span class="pill pill--admin" id="adminBadge">
-        <span class="dot"></span> Active Staff Badge
+      <span class="pill pill--staff" id="adminBadge">
+        <span class="dot"></span> Signed out
       </span>
-      <span class="pill pill--staff">Staff: <strong id="staffName">Fresh Start</strong></span>
-      <button class="linkbtn" id="btnFreshStart" type="button">Fresh Start</button>
+      <span class="pill pill--staff">Staff: <strong id="staffName">—</strong></span>
+      <span class="pill pill--muted" id="syncPill"><span class="dot"></span> Local only</span>
+      <button class="linkbtn" id="btnSignOut" type="button" hidden>Sign out</button>
     </div>
   </div>
 
@@ -46,8 +47,11 @@
       <button class="tab" data-view="merits" type="button">Merits &amp; Discipline</button>
       <button class="tab" data-view="attendance" type="button">Attendance</button>
       <button class="tab" data-view="rooms" type="button">Room Checks</button>
+      <button class="tab" data-view="roomsAdmin" data-owner-only type="button" hidden>Rooms</button>
       <button class="tab" data-view="parents" type="button">Parents</button>
       <button class="tab" data-view="bookings" type="button">2027 Bookings</button>
+      <button class="tab" data-view="broadcast" type="button">Broadcast</button>
+      <button class="tab" data-view="admin" data-owner-only type="button" hidden>Admin</button>
     </div>
   </nav>
 
@@ -57,8 +61,11 @@
 
   <footer class="foot">
     <p>HTS Klerksdorp Hostel • UBERRIMAE FIDEI • Offline-ready PWA</p>
-    <p class="foot__small">All signed-in staff operate with full admin access.</p>
+    <p class="foot__small">Shared live data — what one staff member saves appears on every phone. Owner: D Smit.</p>
   </footer>
+
+  <!-- ===== Login gate ===== -->
+  <div class="gate" id="gate" hidden></div>
 
   <!-- ===== Modal host ===== -->
   <div class="modal" id="modal" hidden>
