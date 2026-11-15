@@ -279,13 +279,14 @@
   }
 
   var pushTimer = null, pushing = false, pushAgain = false;
+  var cloudReady = false;      // true once we have seen the shared dataset
   function schedulePush() {
-    if (!isSignedIn()) return;
+    if (!isSignedIn() || !cloudReady) return;
     clearTimeout(pushTimer);
     pushTimer = setTimeout(doPush, 1200);
   }
   function doPush() {
-    if (!isSignedIn()) return;
+    if (!isSignedIn() || !cloudReady) return;
     if (pushing) { pushAgain = true; return; }
     pushing = true;
     setSync('syncing');
@@ -301,25 +302,30 @@
   function pullOnce(silent) {
     if (document.querySelector('.modal:not([hidden])')) return Promise.resolve();
     return cloudPull().then(function (remote) {
+      cloudReady = true;
       if (remote && typeof remote.updatedAt === 'number' &&
           remote.updatedAt > (state.updatedAt || 0) + 400) {
         state = normalize(remote);
         persistLocal();
-        // the owner may have removed or disabled this account on another phone
-        if (session) {
-          var still = state.staff.find(function (x) { return x.id === session.id && x.active !== false; });
-          if (!still) {
-            session = null;
-            localStorage.removeItem(SESSION_KEY);
-            stopPolling();
-            syncHeader();
-            renderGate();
-            toast('Your account was changed — please sign in again');
-            return;
-          }
-          session.role = still.role;
-          session.name = still.name;
+        // waiting at the sign-in screen: refresh the staff list it shows
+        if (!session) {
+          if (staffSignature() !== gateSig) renderGate();
+          setSync('live');
+          return;
         }
+        // the owner may have removed or disabled this account on another phone
+        var still = state.staff.find(function (x) { return x.id === session.id && x.active !== false; });
+        if (!still) {
+          session = null;
+          localStorage.removeItem(SESSION_KEY);
+          stopPolling();
+          syncHeader();
+          renderGate();
+          toast('Your account was changed — please sign in again');
+          return;
+        }
+        session.role = still.role;
+        session.name = still.name;
         syncHeader();
         render();
         if (!silent) toast('Synced from another device');
@@ -332,8 +338,8 @@
   function startPolling() {
     stopPolling();
     pollTimer = setInterval(function () {
-      if (document.hidden || !isSignedIn()) return;
-      pullOnce(true);
+      if (document.hidden) return;
+      pullOnce(true);           // signed in or still at the sign-in screen
     }, POLL_MS);
   }
   function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
@@ -1483,6 +1489,13 @@
      --------------------------------------------------------- */
   var gateError = '';
   var gateWho = '';            // remembers the chosen staff member between attempts
+  var gateSig = '';            // staff list the sign-in screen is currently showing
+
+  function staffSignature() {
+    return state.staff.filter(function (s) { return s.active !== false; })
+      .map(function (s) { return s.id + '|' + s.name + '|' + (s.pin ? '1' : '0') + '|' + s.role; })
+      .join(';');
+  }
 
   function renderGate() {
     var el = $('#gate');
@@ -1497,6 +1510,7 @@
       '</div>';
 
     var active = state.staff.filter(function (s) { return s.active !== false; });
+    gateSig = staffSignature();
     var opts = active.map(function (s) {
       return '<option value="' + s.id + '" data-nopass="' + (s.pin ? '0' : '1') + '" data-owner="' + (s.role === 'owner' ? '1' : '0') + '">' +
         esc(s.name) + (s.role === 'owner' ? ' (Owner)' : '') + '</option>';
@@ -1697,9 +1711,13 @@
     });
 
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden && isSignedIn()) pullOnce(true);
+      if (!document.hidden) pullOnce(true);
     });
-    window.addEventListener('online', function () { setSync('live'); if (isSignedIn()) doPush(); });
+    window.addEventListener('online', function () {
+      setSync('live');
+      if (isSignedIn()) doPush();
+      pullOnce(true);
+    });
     window.addEventListener('offline', function () { setSync('offline'); });
   }
 
@@ -1771,11 +1789,10 @@
     setSync(navigator.onLine ? 'local' : 'offline');
     renderGate();
 
-    if (isSignedIn()) {
-      render(true);
-      startPolling();
-      pullOnce(true);
-    }
+    if (isSignedIn()) render(true);
+    // always reach for the shared data — the sign-in screen needs the staff list
+    startPolling();
+    pullOnce(true);
   }
 
   if (document.readyState === 'loading') {
