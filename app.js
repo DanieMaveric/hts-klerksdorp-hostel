@@ -10,7 +10,7 @@
   'use strict';
 
   var STORE_KEY   = 'hts_hostel_pwa_v1';        // offline cache (this device)
-  var SESSION_KEY = 'hts_hostel_session_v1';    // who is signed in on this device
+  var SESSION_KEY = 'hts_hostel_session_v2';    // who is signed in on this device
 
   /* --- shared cloud store (publishable/anon key only) --- */
   var CLOUD_URL = 'https://czsoojfrnwcwyzejxsge.supabase.co/rest/v1/hostel_state';
