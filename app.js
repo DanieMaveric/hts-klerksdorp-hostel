@@ -22,7 +22,19 @@
   var MOTTO = 'UBERRIMAE FIDEI';
   var OWNER_NAME = 'D Smit';            // the only account with full control
   var ROOM_COUNT = 64;
+  var TERM_COUNT = 4;                   // school terms used for roll call (Term 1–4)
   var POLL_MS = 10000;                  // how often we look for other phones' updates
+
+  /* Every learner is enrolled in one or more terms. Roll call is kept
+     separately per term, so a learner who leaves in Term 2 stops
+     appearing on the Term 3 and Term 4 roll calls. */
+  function allTerms() {
+    var out = [];
+    for (var n = 1; n <= TERM_COUNT; n++) out.push(n);
+    return out;
+  }
+  function termLabel(n) { return 'Term ' + n; }
+  function currentTermNo() { return Math.floor(new Date().getMonth() / 3) + 1; }
 
   /* ---------------------------------------------------------
      1. SEED DATA — the boarders from the hostel document
@@ -96,6 +108,7 @@
   var ui = {
     view: 'dashboard',
     grade: 'all',
+    term: currentTermNo(),      // which term the roll call is being taken for
     search: '',
     attDate: todayKey(),
     roomDate: todayKey(),
@@ -111,7 +124,7 @@
 
   function seedState() {
     var boarders = SEED_BOARDERS.map(function (b, i) {
-      return { id: 'b' + (i + 1), name: b[0], grade: b[1], room: b[2], parentId: 'p' + (i + 1) };
+      return { id: 'b' + (i + 1), name: b[0], grade: b[1], room: b[2], parentId: 'p' + (i + 1), terms: allTerms() };
     });
     var parents = {};
     boarders.forEach(function (b, i) {
@@ -166,9 +179,21 @@
     if (!Array.isArray(s.staff) || !s.staff.length) s.staff = base.staff;
     if (!Array.isArray(s.rooms) || !s.rooms.length) s.rooms = base.rooms;
     if (!Array.isArray(s.boarders)) s.boarders = [];
+    // every learner needs a term enrolment list (Term 1–4)
+    s.boarders.forEach(function (b) {
+      if (!Array.isArray(b.terms)) b.terms = [];
+      b.terms = b.terms.map(Number).filter(function (n) { return n >= 1 && n <= TERM_COUNT; });
+      if (!b.terms.length) b.terms = allTerms();
+    });
     if (!s.parents || typeof s.parents !== 'object') s.parents = {};
     if (!Array.isArray(s.incidents)) s.incidents = [];
     if (!s.attendance || typeof s.attendance !== 'object') s.attendance = {};
+    else {
+      // older builds kept roll call as { date: {...} }; move it under Term 1
+      var aKeys = Object.keys(s.attendance);
+      var datesOnly = aKeys.length > 0 && aKeys.every(function (k) { return /^\d{4}-\d{2}-\d{2}$/.test(k); });
+      if (datesOnly) s.attendance = { '1': s.attendance };
+    }
     if (!s.roomChecks || typeof s.roomChecks !== 'object') s.roomChecks = {};
     if (!Array.isArray(s.messages)) s.messages = [];
     if (!Array.isArray(s.bookings)) s.bookings = [];
@@ -342,13 +367,44 @@
       return i.type === type && String(i.at).slice(0, 10) === today;
     }).length;
   }
-  function attendanceFor(dateKey) {
-    if (!state.attendance[dateKey]) state.attendance[dateKey] = {};
-    return state.attendance[dateKey];
+  /* Roll call is stored per term, then per date: attendance[term][date][boarderId] */
+  function attendanceFor(term, dateKey) {
+    var t = String(term);
+    if (!state.attendance[t]) state.attendance[t] = {};
+    if (!state.attendance[t][dateKey]) state.attendance[t][dateKey] = {};
+    return state.attendance[t][dateKey];
   }
-  function attStatus(boarder, dateKey) {
-    var day = attendanceFor(dateKey);
+  function attStatus(boarder, term, dateKey) {
+    var day = attendanceFor(term, dateKey);
     return (day[boarder.id] && day[boarder.id].status) || 'present';
+  }
+  /* Learners enrolled for a given term, in roster order. */
+  function termBoarders(term) {
+    return state.boarders.filter(function (b) {
+      return !b.terms || b.terms.indexOf(Number(term)) > -1;
+    });
+  }
+  function termMark(term, sel) {
+    return '<button type="button" data-action="term" data-term="' + term + '" class="' +
+      (Number(sel) === Number(term) ? 'is-on' : '') + '">' + termLabel(term) + '</button>';
+  }
+  function termListText(b) {
+    var t = (b.terms || allTerms()).slice().sort(function (a, c) { return a - c; });
+    return t.map(function (n) { return 'T' + n; }).join('/');
+  }
+  /* Tick-boxes for a learner's term enrolment (used in the learner modals). */
+  function termCheckboxes(selected, idPrefix) {
+    var sel = (selected || allTerms()).map(Number);
+    return allTerms().map(function (n) {
+      return '<label class="termchk"><input type="checkbox" id="' + idPrefix + 'T' + n + '" value="' + n + '"' +
+        (sel.indexOf(n) > -1 ? ' checked' : '') + '> ' + termLabel(n) + '</label>';
+    }).join('');
+  }
+  function readTermCheckboxes(root, idPrefix) {
+    return allTerms().filter(function (n) {
+      var el = $('#' + idPrefix + 'T' + n, root);
+      return el && el.checked;
+    });
   }
   function roomChecksFor(dateKey) {
     if (!state.roomChecks[dateKey]) state.roomChecks[dateKey] = {};
@@ -534,19 +590,21 @@
     return out;
   }
 
-  /* ---- Attendance ---- */
+  /* ---- Roll Call — one list per term (Term 1–4) ---- */
   function renderAttendance() {
-    var day = attendanceFor(ui.attDate);
+    var term = ui.term;
+    var roster = termBoarders(term);
+    var day = attendanceFor(term, ui.attDate);
     var present = 0, absent = 0, late = 0;
-    state.boarders.forEach(function (b) {
-      var s = attStatus(b, ui.attDate);
+    roster.forEach(function (b) {
+      var s = attStatus(b, term, ui.attDate);
       if (s === 'present') present++;
       else if (s === 'absent') absent++;
       else late++;
     });
 
-    var rows = state.boarders.map(function (b) {
-      var s = attStatus(b, ui.attDate);
+    var rows = roster.map(function (b) {
+      var s = attStatus(b, term, ui.attDate);
       var rec = day[b.id] || {};
       return '<tr>' +
         '<td data-label="Boarder" class="td-strong">' + esc(b.name) + '</td>' +
@@ -564,12 +622,16 @@
         '</tr>';
     }).join('');
 
+    var termBar = '<span class="seg seg--terms">' +
+      allTerms().map(function (n) { return termMark(n, term); }).join('') + '</span>';
+
     return '' +
       '<div class="section-head">' +
-        '<h2>Hostel Roll Call &amp; Attendance</h2>' +
-        '<p>Record daily roll call and flag late comings (−2 points).</p>' +
+        '<h2>Roll Call — ' + esc(termLabel(term)) + '</h2>' +
+        '<p>Take the daily roll call for ' + esc(termLabel(term)) + '. Each term keeps its own list and its own records.</p>' +
       '</div>' +
       '<div class="filterbar" style="grid-template-columns:1fr">' +
+        '<div><label>School term</label>' + termBar + '</div>' +
         '<div><label>Roll call date</label><input type="date" id="attDate" value="' + ui.attDate + '"></div>' +
       '</div>' +
       '<div class="stats" style="grid-template-columns:repeat(3,1fr)">' +
@@ -577,9 +639,16 @@
         '<div class="stat stat--red"><div class="stat__label">Absent</div><div class="stat__value">' + absent + '</div></div>' +
         '<div class="stat stat--amber"><div class="stat__label">Late Coming</div><div class="stat__value">' + late + '</div></div>' +
       '</div>' +
-      '<section class="card"><div class="tablewrap"><table class="responsive"><thead><tr>' +
-        '<th>Boarder Name</th><th>Grade &amp; Room</th><th>Late Time / Notes</th><th>Status</th>' +
-      '</tr></thead><tbody>' + rows + '</tbody></table></div></section>';
+      '<div class="row" style="margin-bottom:14px">' +
+        '<button class="btn btn--ghost" data-action="att-all">✓ Mark all present</button>' +
+        '<span class="card__hint">' + roster.length + ' learner' + (roster.length === 1 ? '' : 's') + ' in ' + esc(termLabel(term)) + '</span>' +
+      '</div>' +
+      (rows
+        ? '<section class="card"><div class="tablewrap"><table class="responsive"><thead><tr>' +
+            '<th>Boarder Name</th><th>Grade &amp; Room</th><th>Late Time / Notes</th><th>Status</th>' +
+          '</tr></thead><tbody>' + rows + '</tbody></table></div></section>'
+        : '<section class="card"><p class="empty">No learners are enrolled for ' + esc(termLabel(term)) +
+          ' yet. ' + esc(OWNER_NAME) + ' can set a learner\'s terms on their record.</p></section>');
   }
 
   /* ---- Room Checks — EVERY room, occupied or not ---- */
@@ -886,7 +955,7 @@
   }
 
   function setAttendance(boarderId, status) {
-    var day = attendanceFor(ui.attDate);
+    var day = attendanceFor(ui.term, ui.attDate);
     var rec = day[boarderId] || {};
     var prev = rec.status || 'present';
     rec.status = status;
@@ -906,6 +975,21 @@
       toast('Marked ' + status);
     }
     saveState();
+    render();
+  }
+
+  /* Marks the whole term roster present — the usual starting point at roll call. */
+  function setAllPresent() {
+    var roster = termBoarders(ui.term);
+    if (!roster.length) { toast('No learners enrolled for ' + termLabel(ui.term)); return; }
+    var day = attendanceFor(ui.term, ui.attDate);
+    roster.forEach(function (b) {
+      var rec = day[b.id] || {};
+      rec.status = 'present';
+      day[b.id] = rec;
+    });
+    saveState();
+    toast('All ' + roster.length + ' marked present — ' + termLabel(ui.term));
     render();
   }
 
@@ -1002,17 +1086,17 @@
     lines.push([]);
 
     lines.push(['Merit & Demerit Ledger']);
-    lines.push(['Boarder', 'Grade', 'Room', 'Net Points', 'Incidents', 'Recent Note']);
+    lines.push(['Boarder', 'Grade', 'Room', 'Terms', 'Net Points', 'Incidents', 'Recent Note']);
     state.boarders.forEach(function (b) {
-      lines.push([b.name, b.grade, roomLabel(b.room), netPoints(b), incidentsFor(b.id).length, recentIncidentText(b.id)]);
+      lines.push([b.name, b.grade, roomLabel(b.room), termListText(b), netPoints(b), incidentsFor(b.id).length, recentIncidentText(b.id)]);
     });
     lines.push([]);
 
-    lines.push(['Attendance — ' + prettyDate(ui.attDate)]);
+    lines.push(['Roll Call — ' + termLabel(ui.term) + ' — ' + prettyDate(ui.attDate)]);
     lines.push(['Boarder', 'Grade', 'Room', 'Status', 'Late Time / Notes']);
-    state.boarders.forEach(function (b) {
-      var rec = attendanceFor(ui.attDate)[b.id] || {};
-      lines.push([b.name, b.grade, roomLabel(b.room), attStatus(b, ui.attDate), rec.lateTime || '']);
+    termBoarders(ui.term).forEach(function (b) {
+      var rec = attendanceFor(ui.term, ui.attDate)[b.id] || {};
+      lines.push([b.name, b.grade, roomLabel(b.room), attStatus(b, ui.term, ui.attDate), rec.lateTime || '']);
     });
     lines.push([]);
 
@@ -1088,6 +1172,7 @@
           }).join('') + '</select></div>' +
         '<div class="field"><label>Room placement</label><select id="lnRoom">' + roomOptions(b.room) + '</select></div>' +
       '</div>' +
+      '<div class="field"><label>Enrolled in terms</label><div class="termbar">' + termCheckboxes(b.terms, 'ln') + '</div></div>' +
       '<hr style="border:none;border-top:1px solid var(--line);margin:14px 0">' +
       '<div class="field"><label>Parent / Guardian name</label><input type="text" id="pnName" value="' + esc(p.name || '') + '"></div>' +
       '<div class="field"><label>Relationship</label><input type="text" id="pnRel" value="' + esc(p.relation || '') + '"></div>' +
@@ -1104,9 +1189,12 @@
         $('#lnSave', body).addEventListener('click', function () {
           var name = $('#lnName', body).value.trim();
           if (!name) { toast('Enter the learner name'); return; }
+          var terms = readTermCheckboxes(body, 'ln');
+          if (!terms.length) { toast('Choose at least one term'); return; }
           b.name = name;
           b.grade = Number($('#lnGrade', body).value);
           b.room = Number($('#lnRoom', body).value);
+          b.terms = terms;
           state.parents[b.parentId] = {
             name: $('#pnName', body).value.trim(),
             relation: $('#pnRel', body).value.trim(),
@@ -1195,6 +1283,7 @@
         '</select></div>' +
         '<div class="field"><label>Room</label><select id="alRoom">' + roomOptions(1) + '</select></div>' +
       '</div>' +
+      '<div class="field"><label>Enrolled in terms</label><div class="termbar">' + termCheckboxes(allTerms(), 'al') + '</div></div>' +
       '<div class="field"><label>Parent / Guardian</label><input type="text" id="alParent" placeholder="Mr/Ms Surname"></div>' +
       '<div class="field"><label>Parent contact number</label><input type="tel" id="alPhone" value="' + DEFAULT_PHONE + '"></div>' +
       '<div class="modal__actions">' +
@@ -1204,10 +1293,12 @@
         $('#alSave', body).addEventListener('click', function () {
           var name = $('#alName', body).value.trim();
           if (!name) { toast('Enter the learner name'); return; }
+          var terms = readTermCheckboxes(body, 'al');
+          if (!terms.length) { toast('Choose at least one term'); return; }
           var bid = uid('b'), pid = uid('p');
           state.boarders.push({
             id: bid, name: name, grade: Number($('#alGrade', body).value),
-            room: Number($('#alRoom', body).value), parentId: pid
+            room: Number($('#alRoom', body).value), parentId: pid, terms: terms
           });
           state.parents[pid] = {
             name: $('#alParent', body).value.trim() || 'Mr/Ms ' + surnameOf(name),
@@ -1501,6 +1592,8 @@
       else if (a === 'log-picker') logPicker();
       else if (a === 'export-report') exportReport();
       else if (a === 'att') setAttendance(el.dataset.id, el.dataset.status);
+      else if (a === 'att-all') setAllPresent();
+      else if (a === 'term') { ui.term = Number(el.dataset.term); render(); }
       else if (a === 'room') setRoomStatus(el.dataset.room, el.dataset.status);
       else if (a === 'snap') { photoTarget = el.dataset.room; ensureFileInput().click(); }
       else if (a === 'view-photo') viewPhotoModal(el.dataset.room);
@@ -1572,7 +1665,7 @@
       else if (t.id === 'parentSearch') { ui.parentSearch = t.value; renderPreserveFocus('parentSearch', t.selectionStart); }
       else if (t.id === 'bookingSearch') { ui.bookingSearch = t.value; renderPreserveFocus('bookingSearch', t.selectionStart); }
       else if (t.dataset.action === 'late-time') {
-        var day = attendanceFor(ui.attDate);
+        var day = attendanceFor(ui.term, ui.attDate);
         var rec = day[t.dataset.id] || {};
         rec.lateTime = t.value;
         day[t.dataset.id] = rec;

@@ -210,6 +210,17 @@ label{display:block;font-size:12.5px;font-weight:700;color:var(--muted);margin:0
 .seg button.is-on[data-on=late]{background:var(--amber);color:#fff}
 .seg button.is-on[data-on=absent]{background:var(--red);color:#fff}
 
+/* ---------- Term selector + term enrolment ---------- */
+.seg button.is-on{background:var(--navy);color:#fff}
+.seg--terms{display:flex;width:100%}
+.seg--terms button{flex:1 1 0;padding:11px 6px;font-size:13px}
+.termbar{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+.termchk{
+  display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;
+  background:#f3f6fa;border:1px solid var(--line);border-radius:9px;padding:8px 11px;cursor:pointer;
+}
+.termchk input{width:16px;height:16px;margin:0}
+
 /* ---------- Modal ---------- */
 .modal{position:fixed;inset:0;z-index:100;display:flex;align-items:flex-end;justify-content:center}
 .modal[hidden]{display:none}
